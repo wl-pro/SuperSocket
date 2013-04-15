@@ -73,7 +73,9 @@
     </Compile>
     <Compile Include="Async.cs" />
     <Compile Include="CommandExecutingContext.cs" />
-    <Compile Include="CommandFilterAttribute.cs" />
+    <Compile Include="IStatusInfoSource.cs" />
+    <Compile Include="MetadataExtensions.cs" />
+    <Compile Include="Metadata\CommandFilterAttribute.cs" />
     <Compile Include="Command\CommandLoaderBase.cs" />
     <Compile Include="Command\CommandInfo.cs" />
     <Compile Include="Command\CommandUpdateEventArgs.cs" />
@@ -85,10 +87,11 @@
     <Compile Include="Config\TypeProvider.cs" />
     <Compile Include="Config\TypeProviderCollection.cs" />
     <Compile Include="Config\TypeProviderConfig.cs" />
-    <Compile Include="DisplayAttribute.cs" />
+    <Compile Include="Metadata\DisplayAttribute.cs" />
     <Compile Include="Extensions.cs" />
     <Compile Include="IWorkItem.cs" />
-    <Compile Include="NodeSummary.cs" />
+    <Compile Include="Metadata\StatusInfoAttribute.cs" />
+    <Compile Include="Metadata\StatusInfoMetadataAttribute.cs" />
     <Compile Include="IBootstrap.cs" />
     <Compile Include="ILoggerProvider.cs" />
     <Compile Include="IsolationMode.cs" />
@@ -99,6 +102,7 @@
     <Compile Include="Logging\Log4NetLog.cs" />
     <Compile Include="Logging\Log4NetLogFactory.cs" />
     <Compile Include="Logging\LogFactoryBase.cs" />
+    <Compile Include="Metadata\ProcessStatusInfoMetadata.cs" />
     <Compile Include="Protocol\FilterState.cs" />
     <Compile Include="Protocol\IReceiveFilterInitializer.cs" />
     <Compile Include="Protocol\IOffsetAdapter.cs" />
@@ -145,13 +149,14 @@
     <Compile Include="Protocol\IRequestInfoParser.cs" />
     <Compile Include="Security\CertificateManager.cs" />
     <Compile Include="ServerState.cs" />
-    <Compile Include="ServerSummary.cs" />
+    <Compile Include="Metadata\ServerStatusInfoMetadata.cs" />
     <Compile Include="SessionHandler.cs" />
     <Compile Include="SocketMode.cs" />
     <Compile Include="AppServer.cs" />
     <Compile Include="AppServerBase.cs" />
     <Compile Include="AppSession.cs" />
     <Compile Include="Command\StringCommandBase.cs" />
+    <Compile Include="StatusInfoCollection.cs" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\Common\SuperSocket.Common.Net40.csproj">

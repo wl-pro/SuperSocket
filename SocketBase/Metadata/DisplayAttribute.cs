@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Text;
 
-namespace SuperSocket.SocketBase
+namespace SuperSocket.SocketBase.Metadata
 {
     /// <summary>
     /// Display attribute
@@ -38,13 +38,7 @@ namespace SuperSocket.SocketBase
         public int Order { get; set; }
 
 
-        /// <summary>
-        /// Gets or sets a value indicating whether [output in perf log].
-        /// </summary>
-        /// <value>
-        ///   <c>true</c> if [output in perf log]; otherwise, <c>false</c>.
-        /// </value>
-        public bool OutputInPerfLog { get; set; }
+        
 
 
         /// <summary>
@@ -62,7 +56,6 @@ namespace SuperSocket.SocketBase
         public DisplayAttribute(string name)
         {
             Name = name;
-            OutputInPerfLog = true;
         }
     }
 }
