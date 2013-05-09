@@ -124,6 +124,8 @@ namespace SuperSocket.SocketEngine
 
             m_GlobalLog = logFactory.GetLog(this.GetType().Name);
 
+            AppDomain.CurrentDomain.UnhandledException += new UnhandledExceptionEventHandler(CurrentDomain_UnhandledException);
+
             if (!rootConfig.DisablePerformanceDataCollector)
             {
                 m_PerfMonitor = new PerformanceMonitor(rootConfig, m_AppServers, logFactory);
@@ -300,6 +302,8 @@ namespace SuperSocket.SocketEngine
                 LogFactory = logFactory;
                 m_GlobalLog = logFactory.GetLog(this.GetType().Name);
 
+                AppDomain.CurrentDomain.UnhandledException += new UnhandledExceptionEventHandler(CurrentDomain_UnhandledException);
+
                 try
                 {
                     workItemFactories = factoryInfoLoader.LoadResult(serverConfigResolver);
@@ -373,6 +377,11 @@ namespace SuperSocket.SocketEngine
             m_Initialized = true;
 
             return true;
+        }
+
+        void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
+        {
+            m_GlobalLog.Error("The process crashed for an unhandled exception!", (Exception)e.ExceptionObject);
         }
 
         /// <summary>

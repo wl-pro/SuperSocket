@@ -27,7 +27,7 @@ namespace SuperSocket.SocketEngine
 
         public string Name { get; private set; }
 
-        private StatusInfoAttribute[] m_ServerStatusMetadata;
+        private StatusInfoMetadata[] m_ServerStatusMetadata;
 
         protected IsolationAppServer(string serverTypeName)
         {
@@ -80,53 +80,9 @@ namespace SuperSocket.SocketEngine
             Bootstrap = bootstrap;
             ServerConfig = config;
             Factories = factories;
-
-            if (!bootstrap.Config.DisablePerformanceDataCollector)
-            {
-                if (!LoadServerStatusMetadata())
-                    return false;
-            }
-
             State = ServerState.NotStarted;
+
             return true;
-        }
-
-        protected virtual StatusInfoAttribute[] PrepareServerStatusMetadata(StatusInfoAttribute[] rawMetadata)
-        {
-            return rawMetadata;
-        }
-
-        private bool LoadServerStatusMetadata()
-        {
-            AppDomain setupAppDomain = null;
-
-            try
-            {
-                setupAppDomain = CreateHostAppDomain();
-
-                const string statusInfoAttsKey = "statusInfoAtts";
-
-                setupAppDomain.DoCallBack(new CrossAppDomainDelegate(() =>
-                    {
-                        var serverType = Type.GetType(ServerTypeName);
-                        AppDomain.CurrentDomain.SetData(statusInfoAttsKey, MetadataExtensions.GetAllStatusInfoAtttributes(serverType));
-                    }));
-
-                m_ServerStatusMetadata = PrepareServerStatusMetadata(setupAppDomain.GetData(statusInfoAttsKey) as StatusInfoAttribute[]);
-
-                return true;
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                if (setupAppDomain != null)
-                {
-                    AppDomain.Unload(setupAppDomain);
-                }
-            }
         }
 
         protected abstract IWorkItemBase Start();
@@ -140,6 +96,10 @@ namespace SuperSocket.SocketEngine
             if (AppServer != null)
             {
                 State = ServerState.Running;
+
+                var metadata = AppServer.GetServerStatusMetadata().ToList();
+                OnServerStatusMetadataLoaded(metadata);
+                m_ServerStatusMetadata = metadata.ToArray();
                 return true;
             }
             else
@@ -184,9 +144,18 @@ namespace SuperSocket.SocketEngine
             }
         }
 
-        public StatusInfoAttribute[] GetServerStatusMetadata()
+        public StatusInfoMetadata[] GetServerStatusMetadata()
         {
             return m_ServerStatusMetadata;
+        }
+
+        /// <summary>
+        /// Called when [server status metadata loaded].
+        /// </summary>
+        /// <param name="metadataSource">The metadata source.</param>
+        protected virtual void OnServerStatusMetadataLoaded(List<StatusInfoMetadata> metadataSource)
+        {
+
         }
 
         private StatusInfoCollection m_PrevStatus;
@@ -199,12 +168,12 @@ namespace SuperSocket.SocketEngine
                 m_StoppedStatus = new StatusInfoCollection();
                 m_StoppedStatus.Name = Name;
                 m_StoppedStatus.Tag = Name;
-                m_StoppedStatus[ServerStatusInfoMetadata.IsRunning] = false;
-                m_StoppedStatus[ServerStatusInfoMetadata.MaxConnectionNumber] = ServerConfig.MaxConnectionNumber;
+                m_StoppedStatus[StatusInfoKeys.IsRunning] = false;
+                m_StoppedStatus[StatusInfoKeys.MaxConnectionNumber] = ServerConfig.MaxConnectionNumber;
 
                 if (m_PrevStatus != null)
                 {
-                    m_StoppedStatus[ServerStatusInfoMetadata.Listeners] = m_PrevStatus[ServerStatusInfoMetadata.Listeners];
+                    m_StoppedStatus[StatusInfoKeys.Listeners] = m_PrevStatus[StatusInfoKeys.Listeners];
                 }
             }
 
@@ -225,6 +194,21 @@ namespace SuperSocket.SocketEngine
             var currentStatus = appServer.CollectServerStatus(nodeStatus);
             m_PrevStatus = currentStatus;
             return currentStatus;
+        }
+
+        /// <summary>
+        /// Obtains a lifetime service object to control the lifetime policy for this instance.
+        /// Return null, never expired
+        /// </summary>
+        /// <returns>
+        /// An object of type <see cref="T:System.Runtime.Remoting.Lifetime.ILease" /> used to control the lifetime policy for this instance. This is the current lifetime service object for this instance if one exists; otherwise, a new lifetime service object initialized to the value of the <see cref="P:System.Runtime.Remoting.Lifetime.LifetimeServices.LeaseManagerPollTime" /> property.
+        /// </returns>
+        /// <PermissionSet>
+        ///   <IPermission class="System.Security.Permissions.SecurityPermission, mscorlib, Version=2.0.3600.0, Culture=neutral, PublicKeyToken=b77a5c561934e089" version="1" Flags="RemotingConfiguration, Infrastructure" />
+        ///   </PermissionSet>
+        public override object InitializeLifetimeService()
+        {
+            return null;
         }
 
         public void Dispose()
