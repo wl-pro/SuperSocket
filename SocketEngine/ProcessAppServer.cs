@@ -16,11 +16,13 @@ namespace SuperSocket.SocketEngine
     {
         private const string m_AgentUri = "ipc://{0}/WorkItemAgent.rem";
 
-        private const string m_PortNameTemplate = "SuperSocket.Agent[{0}[{1}]]";
+        private const string m_PortNameTemplate = "{0}[SuperSocket.Agent:{1}]";
 
         private Process m_WorkingProcess;
 
         private string m_ServerTag;
+
+        private ProcessLocker m_Locker;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ProcessAppServer" /> class.
@@ -37,71 +39,112 @@ namespace SuperSocket.SocketEngine
             var currentDomain = AppDomain.CurrentDomain;
             var workingDir = Path.Combine(Path.Combine(currentDomain.BaseDirectory, WorkingDir), Name);
 
-            var portName = string.Format(m_PortNameTemplate, Name, Guid.NewGuid().ToString().GetHashCode());
-            var args = new string[] { Name, portName };
+            if (!Directory.Exists(workingDir))
+                Directory.CreateDirectory(workingDir);
 
-            var startInfo = new ProcessStartInfo(Path.Combine(currentDomain.BaseDirectory, "SuperSocket.Agent.exe"), string.Join(" ", args.Select(a => "\"" + a + "\"").ToArray()));
-            startInfo.CreateNoWindow = true;
-            startInfo.WindowStyle = ProcessWindowStyle.Hidden;
-            startInfo.WorkingDirectory = workingDir;
-            startInfo.UseShellExecute = false;
-            startInfo.RedirectStandardOutput = true;
+            m_Locker = new ProcessLocker(workingDir, "instance.lock");
 
-            try
+            var portName = string.Format(m_PortNameTemplate, Name, "{0}");
+
+            var process = m_Locker.GetLockedProcess();
+
+
+            if (process == null)
             {
-                m_WorkingProcess = Process.Start(startInfo);
-            }
-            catch
-            {
-                return null;
-            }
+                var args = new string[] { Name, portName, workingDir };
 
-            var output = m_WorkingProcess.StandardOutput;
+                var startInfo = new ProcessStartInfo("SuperSocket.Agent.exe", string.Join(" ", args.Select(a => "\"" + a + "\"").ToArray()));
+                startInfo.CreateNoWindow = true;
+                startInfo.WindowStyle = ProcessWindowStyle.Hidden;
+                startInfo.WorkingDirectory = currentDomain.BaseDirectory;
+                startInfo.UseShellExecute = false;
+                startInfo.RedirectStandardOutput = true;
 
-            var startResult = output.ReadLine();
-
-            if (!"Ok".Equals(startResult, StringComparison.OrdinalIgnoreCase))
-            {
-                return null;
-            }
-
-            Task.Factory.StartNew(() =>
+                try
                 {
-                    while (!output.EndOfStream)
-                    {
-                        var line = output.ReadLine();
-                        Console.WriteLine(portName + ":" + line);
-                    }
-                }, TaskCreationOptions.LongRunning);
+                    m_WorkingProcess = Process.Start(startInfo);
+                }
+                catch
+                {
+                    return null;
+                }
+            }
+            else
+            {
+                m_WorkingProcess = process;
+            }
+
+            portName = string.Format(portName, m_WorkingProcess.Id);
 
             var remoteUri = string.Format(m_AgentUri, portName);
             var appServer = (IRemoteWorkItem)Activator.GetObject(typeof(IRemoteWorkItem), remoteUri);
 
-            var ret = appServer.Setup(ServerTypeName, "ipc://" + ProcessBootstrap.BootstrapIpcPort + "/Bootstrap.rem", currentDomain.BaseDirectory, ServerConfig, Factories);
-
-            if (!ret)
+            if (process == null)
             {
-                ShutdownProcess();
-                return null;
+                var output = m_WorkingProcess.StandardOutput;
+
+                var startResult = output.ReadLine();
+
+                if (!"Ok".Equals(startResult, StringComparison.OrdinalIgnoreCase))
+                {
+                    return null;
+                }
+
+                Task.Factory.StartNew(() =>
+                    {
+                        while (!output.EndOfStream)
+                        {
+                            output.ReadLine();
+                        }
+                    }, TaskCreationOptions.LongRunning);
+
+
+                //Setup and then start the remote server instance
+                var ret = appServer.Setup(ServerTypeName, "ipc://" + ProcessBootstrap.BootstrapIpcPort + "/Bootstrap.rem", currentDomain.BaseDirectory, ServerConfig, Factories);
+
+                if (!ret)
+                {
+                    ShutdownProcess();
+                    return null;
+                }
+
+                ret = appServer.Start();
+
+                if (!ret)
+                {
+                    ShutdownProcess();
+                    return null;
+                }
+
+                m_Locker.SaveLock(m_WorkingProcess);
             }
 
-            ret = appServer.Start();
+            m_ServerTag = portName;
 
-            if (!ret)
-            {
-                ShutdownProcess();
-                return null;
-            }
-
-            m_ServerTag = string.Format("{0}/{1}:{2}", Name, m_WorkingProcess.ProcessName, m_WorkingProcess.Id);
+            m_WorkingProcess.EnableRaisingEvents = true;
+            m_WorkingProcess.Exited += new EventHandler(m_WorkingProcess_Exited);
 
             return appServer;
         }
 
+        void m_WorkingProcess_Exited(object sender, EventArgs e)
+        {
+            m_Locker.CleanLock();
+            OnStopped();
+        }
+
         protected override void OnStopped()
         {
+            var unexpectedShutdown = (State == ServerState.Running);
+
             base.OnStopped();
             m_WorkingProcess = null;
+
+            if (unexpectedShutdown)
+            {
+                //auto restart if meet a unexpected shutdown
+                ((IWorkItemBase)this).Start();
+            }
         }
 
         private void ShutdownProcess()
@@ -115,20 +158,6 @@ namespace SuperSocket.SocketEngine
                 catch
                 {
 
-                }
-                finally
-                {
-                    var waitExitRound = 0;
-
-                    while (!m_WorkingProcess.HasExited && waitExitRound < 5)
-                    {
-                        if (m_WorkingProcess.WaitForExit(1000))
-                            break;
-
-                        waitExitRound++;
-                    }
-
-                    OnStopped();
                 }
             }
         }
