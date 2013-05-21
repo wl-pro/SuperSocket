@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
+using System.Net.Security;
 using System.Security.Authentication;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -10,10 +11,10 @@ using SuperSocket.Common;
 using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Config;
 using SuperSocket.SocketBase.Logging;
+using SuperSocket.SocketBase.Metadata;
 using SuperSocket.SocketBase.Protocol;
 using SuperSocket.SocketBase.Provider;
 using SuperSocket.SocketBase.Security;
-using SuperSocket.SocketBase.Metadata;
 
 namespace SuperSocket.SocketBase
 {
@@ -22,7 +23,7 @@ namespace SuperSocket.SocketBase
     /// </summary>
     /// <typeparam name="TAppSession">The type of the app session.</typeparam>
     /// <typeparam name="TRequestInfo">The type of the request info.</typeparam>
-    public abstract partial class AppServerBase<TAppSession, TRequestInfo> : IAppServer<TAppSession, TRequestInfo>, IRawDataProcessor<TAppSession>, IRequestHandler<TRequestInfo>, ISocketServerAccessor, IStatusInfoSource, IDisposable
+    public abstract partial class AppServerBase<TAppSession, TRequestInfo> : IAppServer<TAppSession, TRequestInfo>, IRawDataProcessor<TAppSession>, IRequestHandler<TRequestInfo>, ISocketServerAccessor, IStatusInfoSource, IRemoteCertificateValidator, IDisposable
         where TRequestInfo : class, IRequestInfo
         where TAppSession : AppSession<TAppSession, TRequestInfo>, IAppSession, new()
     {
@@ -864,6 +865,25 @@ namespace SuperSocket.SocketBase
             return CertificateManager.Initialize(certificate);
         }
 
+        bool IRemoteCertificateValidator.Validate(IAppSession session, object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
+        {
+            return ValidateClientCertificate((TAppSession)session, sender, certificate, chain, sslPolicyErrors);
+        }
+
+        /// <summary>
+        /// Validates the client certificate. This method is only used if the certificate configuration attribute "clientCertificateRequired" is true.
+        /// </summary>
+        /// <param name="session">The session.</param>
+        /// <param name="sender">The sender.</param>
+        /// <param name="certificate">The certificate.</param>
+        /// <param name="chain">The chain.</param>
+        /// <param name="sslPolicyErrors">The SSL policy errors.</param>
+        /// <returns>return the validation result</returns>
+        protected virtual bool ValidateClientCertificate(TAppSession session, object sender, X509Certificate certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
+        {
+            return sslPolicyErrors == SslPolicyErrors.None;
+        }
+
         /// <summary>
         /// Setups the socket server.instance
         /// </summary>
@@ -1046,10 +1066,27 @@ namespace SuperSocket.SocketBase
             m_ServerStatus[StatusInfoKeys.IsRunning] = true;
             m_ServerStatus[StatusInfoKeys.StartedTime] = StartedTime;
 
-            OnStartup();
+            try
+            {
+                //Will be removed in the next version
+#pragma warning disable 0612, 618
+                OnStartup();
+#pragma warning restore 0612, 618
 
-            if (Logger.IsInfoEnabled)
-                Logger.Info(string.Format("The server instance {0} has been started!", Name));
+                OnStarted();
+            }
+            catch (Exception e)
+            {
+                if (Logger.IsErrorEnabled)
+                {
+                    Logger.Error("One exception wa thrown in the method 'OnStartup()'.", e);
+                }
+            }
+            finally
+            {
+                if (Logger.IsInfoEnabled)
+                    Logger.Info(string.Format("The server instance {0} has been started!", Name));
+            }
 
             return true;
         }
@@ -1057,7 +1094,16 @@ namespace SuperSocket.SocketBase
         /// <summary>
         /// Called when [startup].
         /// </summary>
+        [Obsolete("Use OnStarted() instead")]
         protected virtual void OnStartup()
+        {
+
+        }
+
+        /// <summary>
+        /// Called when [started].
+        /// </summary>
+        protected virtual void OnStarted()
         {
 
         }
@@ -1525,10 +1571,10 @@ namespace SuperSocket.SocketBase
 
         }
 
-        StatusInfoCollection IStatusInfoSource.CollectServerStatus(StatusInfoCollection nodeStatus)
+        StatusInfoCollection IStatusInfoSource.CollectServerStatus(StatusInfoCollection bootstrapStatus)
         {
             UpdateServerStatus(m_ServerStatus);
-            this.AsyncRun(() => OnServerStatusCollected(nodeStatus, m_ServerStatus), e => Logger.Error(e));
+            this.AsyncRun(() => OnServerStatusCollected(bootstrapStatus, m_ServerStatus), e => Logger.Error(e));
             return m_ServerStatus;
         }
 
@@ -1558,9 +1604,9 @@ namespace SuperSocket.SocketBase
         /// <summary>
         /// Called when [server status collected].
         /// </summary>
-        /// <param name="nodeStatus">The node status.</param>
+        /// <param name="bootstrapStatus">The bootstrapStatus status.</param>
         /// <param name="serverStatus">The server status.</param>
-        protected virtual void OnServerStatusCollected(StatusInfoCollection nodeStatus, StatusInfoCollection serverStatus)
+        protected virtual void OnServerStatusCollected(StatusInfoCollection bootstrapStatus, StatusInfoCollection serverStatus)
         {
 
         }
