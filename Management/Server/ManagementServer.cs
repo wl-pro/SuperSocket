@@ -11,8 +11,7 @@ using SuperSocket.SocketBase.Protocol;
 using SuperSocket.WebSocket;
 using SuperSocket.WebSocket.Protocol;
 using SuperSocket.WebSocket.SubProtocol;
-using System.IO;
-using System.Threading;
+using SuperSocket.SocketBase.Metadata;
 
 namespace SuperSocket.Management.Server
 {
@@ -25,7 +24,31 @@ namespace SuperSocket.Management.Server
 
         private string[] m_ExcludedServers;
 
-        private FileSystemWatcher m_StatusFileWatcher;
+        private List<KeyValuePair<string, StatusInfoAttribute[]>> m_ServerStatusMetadataSource;
+
+        /// <summary>
+        /// Gets the server status metadata source.
+        /// </summary>
+        /// <value>
+        /// The server status metadata source.
+        /// </value>
+        internal List<KeyValuePair<string, StatusInfoAttribute[]>> ServerStatusMetadataSource
+        {
+            get { return m_ServerStatusMetadataSource; }
+        }
+
+        private NodeStatus m_CurrentNodeStatus;
+
+        /// <summary>
+        /// Gets the current node status.
+        /// </summary>
+        /// <value>
+        /// The current node status.
+        /// </value>
+        internal NodeStatus CurrentNodeStatus
+        {
+            get { return m_CurrentNodeStatus; }
+        }
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ManagementServer"/> class.
@@ -69,84 +92,44 @@ namespace SuperSocket.Management.Server
             return true;
         }
 
-        private long m_LastModifiedTime = 0;
-
-        protected override void OnStarted()
+        /// <summary>
+        /// Gets the name of the server by.
+        /// </summary>
+        /// <param name="serverName">Name of the server.</param>
+        /// <returns></returns>
+        internal IWorkItem GetServerByName(string serverName)
         {
-            m_StatusFileWatcher = new FileSystemWatcher(Path.Combine(Bootstrap.BaseDirectory), "status.bin");
-            m_StatusFileWatcher.NotifyFilter = NotifyFilters.LastWrite;
-            m_StatusFileWatcher.Changed += new FileSystemEventHandler(m_StatusFileWatcher_Changed);
-            m_StatusFileWatcher.EnableRaisingEvents = true;
-
-            base.OnStarted();
+            return Bootstrap.AppServers.FirstOrDefault(s => s.Name.Equals(serverName, StringComparison.OrdinalIgnoreCase));
         }
 
-        void m_StatusFileWatcher_Changed(object sender, FileSystemEventArgs e)
+        /// <summary>
+        /// Gets the name of the user by.
+        /// </summary>
+        /// <param name="name">The name.</param>
+        /// <returns></returns>
+        internal UserConfig GetUserByName(string name)
         {
-            m_StatusFileWatcher.EnableRaisingEvents = false;
-
-            if(!FireStatusFileChanged(e))
-                m_StatusFileWatcher.EnableRaisingEvents = true;
+            UserConfig user;
+            m_UsersDict.TryGetValue(name, out user);
+            return user;
         }
 
-        private bool FireStatusFileChanged(FileSystemEventArgs e)
+        private void OnServerStatusCollected(object status)
         {
-            long currentTicks = 0;
-
-            try
-            {
-                currentTicks = File.GetLastWriteTime(e.FullPath).Ticks;
-            }
-            catch (Exception exc)
-            {
-                Logger.Error("One exception was thrown when get the status file's last write time.", exc);
-                return false;
-            }
-
-            var prevTicks = m_LastModifiedTime;
-
-            if (currentTicks == prevTicks)
-                return false;
-
-            //Already updated
-            if (Interlocked.CompareExchange(ref m_LastModifiedTime, currentTicks, prevTicks) != prevTicks)
-                return false;
-
-            ThreadPool.QueueUserWorkItem(HandleUpdatedStatusFile, e.FullPath);
-
-            return true;
+            m_CurrentNodeStatus = (NodeStatus)status;
+            Logger.Info(JsonSerialize(status));
         }
 
-        private void HandleUpdatedStatusFile(object state)
+        protected override void OnSystemMessageReceived(string messageType, object messageData)
         {
-            var filePath = (string)state;
-
-            Thread.Sleep(500);
-
-            NodeStatus nodeStatus;
-
-            try
+            if (messageType == "ServerStatusCollected")
             {
-                nodeStatus = NodeStatus.LoadFrom(filePath);
-                Logger.Info(JsonConvert.SerializeObject(nodeStatus, m_IPEndPointConverter));
+                this.AsyncRun(OnServerStatusCollected, messageData);
             }
-            catch (Exception exc)
+            else if (messageType == "ServerMetadataCollected")
             {
-                Logger.Error("One exception was thrown when load the status data file.", exc);
+                m_ServerStatusMetadataSource = (List<KeyValuePair<string, StatusInfoAttribute[]>>)messageData;
             }
-            finally
-            {
-                m_StatusFileWatcher.EnableRaisingEvents = true;
-            }
-        }
-
-        protected override void OnStopped()
-        {
-            m_StatusFileWatcher.EnableRaisingEvents = false;
-            m_StatusFileWatcher.Dispose();
-            m_StatusFileWatcher = null;
-
-            base.OnStopped();
         }
 
         private static JsonConverter m_IPEndPointConverter = new ListenersJsonConverter();
