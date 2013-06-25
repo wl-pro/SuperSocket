@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using NUnit.Framework;
+using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Config;
 using SuperSocket.SocketBase.Logging;
 using SuperSocket.SocketBase.Protocol;
@@ -20,13 +21,14 @@ namespace SuperSocket.Test.Protocol
 
         protected abstract IReceiveFilterFactory<StringRequestInfo> CurrentReceiveFilterFactory { get; }
 
-        [TestFixtureSetUp]
+        [SetUp]
         public void Setup()
         {
-            m_Server = CreateServer(CurrentReceiveFilterFactory);
+            var mode = TestContext.CurrentContext.Test.Name.Contains("Udp") ? SocketMode.Udp : SocketMode.Tcp;
+            m_Server = CreateServer(CurrentReceiveFilterFactory, mode);
         }
 
-        [TestFixtureTearDown]
+        [TearDown]
         public void TearDown()
         {
             m_Server.Stop();
@@ -34,11 +36,18 @@ namespace SuperSocket.Test.Protocol
 
         private TestServer CreateServer(IReceiveFilterFactory<StringRequestInfo> receiveFilterFactory)
         {
+            return CreateServer(receiveFilterFactory, SocketMode.Tcp);
+        }
+
+        private TestServer CreateServer(IReceiveFilterFactory<StringRequestInfo> receiveFilterFactory, SocketMode mode)
+        {
             var appServer = new TestServer();
 
             var serverConfig = new ServerConfig();
             serverConfig.Ip = "127.0.0.1";
             serverConfig.Port = 2012;
+            serverConfig.Mode = mode;
+            serverConfig.DisableSessionSnapshot = true;
 
             var setupResult = appServer.Setup(serverConfig, null, receiveFilterFactory, new ConsoleLogFactory(), null, null);
 
@@ -78,6 +87,31 @@ namespace SuperSocket.Test.Protocol
                     var receivedLine = reader.ReadLine();
 
                     Assert.AreEqual(line, receivedLine);
+                }
+            }
+        }
+
+        [Test]
+        public void TestMiddleBreak()
+        {
+            for (var i = 0; i < 100; i++)
+            {
+                using (var socket = CreateClient())
+                {
+                    var socketStream = new NetworkStream(socket);
+                    using (var reader = new StreamReader(socketStream, Encoding.ASCII, true))
+                    using (var writer = new ConsoleWriter(socketStream, Encoding.ASCII, 1024 * 8))
+                    {
+                        reader.ReadLine();
+
+                        var line = Guid.NewGuid().ToString();
+                        var sendingLine = CreateRequest(line);
+                        writer.Write(sendingLine.Substring(0, sendingLine.Length / 2));
+                        writer.Flush();
+
+                        var s = m_Server.GetAllSessions().FirstOrDefault();
+                        s.Close();
+                    }
                 }
             }
         }
@@ -203,6 +237,27 @@ namespace SuperSocket.Test.Protocol
                     }
                 }
             }
+        }
+
+
+        [Test]
+        public void TestUdpRequest()
+        {
+            EndPoint serverAddress = new IPEndPoint(IPAddress.Parse("127.0.0.1"), 2012);
+            var client = new Socket(serverAddress.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+
+            var line = Guid.NewGuid().ToString();
+
+            var data = Encoding.ASCII.GetBytes(CreateRequest(line));
+
+            client.SendTo(data, serverAddress);
+
+            var receiveData = new byte[data.Length];
+
+            var len = client.ReceiveFrom(receiveData, ref serverAddress);
+
+            Assert.AreEqual(line.Length, len);
+            Assert.AreEqual(line, Encoding.ASCII.GetString(receiveData, 0, len));
         }
     }
 }

@@ -1,17 +1,18 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
+using System.Threading;
 using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Config;
-using SuperSocket.SocketBase.Provider;
 using SuperSocket.SocketBase.Metadata;
-using System.IO;
-using System.Reflection;
+using SuperSocket.SocketBase.Provider;
 
 namespace SuperSocket.SocketEngine
 {
-    abstract class IsolationAppServer : MarshalByRefObject, IWorkItem, IStatusInfoSource, IDisposable
+    abstract class IsolationAppServer : MarshalByRefObject, IWorkItem, IStatusInfoSource, IExceptionSource, IDisposable
     {
         protected const string WorkingDir = "InstancesRoot";
 
@@ -27,12 +28,15 @@ namespace SuperSocket.SocketEngine
 
         public string Name { get; private set; }
 
-        private StatusInfoMetadata[] m_ServerStatusMetadata;
+        private StatusInfoAttribute[] m_ServerStatusMetadata;
 
-        protected IsolationAppServer(string serverTypeName)
+        private AutoResetEvent m_StopResetEvent = new AutoResetEvent(false);
+
+        protected IsolationAppServer(string serverTypeName, StatusInfoAttribute[] serverStatusMetadata)
         {
             State = ServerState.NotInitialized;
             ServerTypeName = serverTypeName;
+            m_ServerStatusMetadata = serverStatusMetadata;
         }
 
         protected AppDomain CreateHostAppDomain()
@@ -96,10 +100,6 @@ namespace SuperSocket.SocketEngine
             if (AppServer != null)
             {
                 State = ServerState.Running;
-
-                var metadata = AppServer.GetServerStatusMetadata().ToList();
-                OnServerStatusMetadataLoaded(metadata);
-                m_ServerStatusMetadata = metadata.ToArray();
                 return true;
             }
             else
@@ -123,12 +123,14 @@ namespace SuperSocket.SocketEngine
             State = ServerState.Stopping;
             appServer.Stop();
             Stop();
+            m_StopResetEvent.WaitOne();
         }
 
         protected virtual void OnStopped()
         {
             State = ServerState.NotStarted;
             AppServer = null;
+            m_StopResetEvent.Set();
         }
 
         public int SessionCount
@@ -144,18 +146,9 @@ namespace SuperSocket.SocketEngine
             }
         }
 
-        public StatusInfoMetadata[] GetServerStatusMetadata()
+        public StatusInfoAttribute[] GetServerStatusMetadata()
         {
             return m_ServerStatusMetadata;
-        }
-
-        /// <summary>
-        /// Called when [server status metadata loaded].
-        /// </summary>
-        /// <param name="metadataSource">The metadata source.</param>
-        protected virtual void OnServerStatusMetadataLoaded(List<StatusInfoMetadata> metadataSource)
-        {
-
         }
 
         private StatusInfoCollection m_PrevStatus;
@@ -227,6 +220,28 @@ namespace SuperSocket.SocketEngine
         ~IsolationAppServer()
         {
             Dispose(false);
+        }
+
+        public event EventHandler<SuperSocket.Common.ErrorEventArgs> ExceptionThrown;
+
+        protected void OnExceptionThrown(Exception exc)
+        {
+            var handler = ExceptionThrown;
+
+            if (handler == null)
+                return;
+
+            handler(this, new SuperSocket.Common.ErrorEventArgs(exc));
+        }
+
+        public void TransferSystemMessage(string messageType, object messageData)
+        {
+            var appServer = AppServer;
+
+            if (appServer == null)
+                OnExceptionThrown(new Exception("You cannot send system message to the instance who is not started."));
+
+            appServer.TransferSystemMessage(messageType, messageData);
         }
     }
 }

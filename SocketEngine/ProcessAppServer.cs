@@ -4,11 +4,12 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Config;
-using SuperSocket.SocketBase.Provider;
 using SuperSocket.SocketBase.Metadata;
+using SuperSocket.SocketBase.Provider;
 
 namespace SuperSocket.SocketEngine
 {
@@ -24,12 +25,17 @@ namespace SuperSocket.SocketEngine
 
         private ProcessLocker m_Locker;
 
+        private AutoResetEvent m_ProcessWorkEvent = new AutoResetEvent(false);
+
+        private string m_ProcessWorkStatus = string.Empty;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="ProcessAppServer" /> class.
         /// </summary>
         /// <param name="serverTypeName">Name of the server type.</param>
-        public ProcessAppServer(string serverTypeName)
-            : base(serverTypeName)
+        /// <param name="serverStatusMetadata">The server status metadata.</param>
+        public ProcessAppServer(string serverTypeName, StatusInfoAttribute[] serverStatusMetadata)
+            : base(serverTypeName, serverStatusMetadata)
         {
 
         }
@@ -59,13 +65,19 @@ namespace SuperSocket.SocketEngine
                 startInfo.WorkingDirectory = currentDomain.BaseDirectory;
                 startInfo.UseShellExecute = false;
                 startInfo.RedirectStandardOutput = true;
+                startInfo.RedirectStandardError = true;
 
                 try
                 {
                     m_WorkingProcess = Process.Start(startInfo);
+                    m_WorkingProcess.ErrorDataReceived += new DataReceivedEventHandler(m_WorkingProcess_ErrorDataReceived);
+                    m_WorkingProcess.BeginErrorReadLine();
+                    m_WorkingProcess.OutputDataReceived += new DataReceivedEventHandler(m_WorkingProcess_OutputDataReceived);
+                    m_WorkingProcess.BeginOutputReadLine();
                 }
-                catch
+                catch (Exception e)
                 {
+                    OnExceptionThrown(e);
                     return null;
                 }
             }
@@ -75,36 +87,38 @@ namespace SuperSocket.SocketEngine
             }
 
             portName = string.Format(portName, m_WorkingProcess.Id);
+            m_ServerTag = portName;
 
             var remoteUri = string.Format(m_AgentUri, portName);
             var appServer = (IRemoteWorkItem)Activator.GetObject(typeof(IRemoteWorkItem), remoteUri);
 
             if (process == null)
             {
-                var output = m_WorkingProcess.StandardOutput;
-
-                var startResult = output.ReadLine();
-
-                if (!"Ok".Equals(startResult, StringComparison.OrdinalIgnoreCase))
+                if (!m_ProcessWorkEvent.WaitOne(5000))
                 {
+                    ShutdownProcess();
+                    OnExceptionThrown(new Exception("The remote work item was timeout to setup!"));
                     return null;
                 }
 
-                Task.Factory.StartNew(() =>
-                    {
-                        while (!output.EndOfStream)
-                        {
-                            output.ReadLine();
-                        }
-                    }, TaskCreationOptions.LongRunning);
+                if (!"Ok".Equals(m_ProcessWorkStatus, StringComparison.OrdinalIgnoreCase))
+                {
+                    OnExceptionThrown(new Exception("The Agent process didn't start successfully!"));
+                    return null;
+                }
 
+                var bootstrapIpcPort = AppDomain.CurrentDomain.GetData("BootstrapIpcPort") as string;
+
+                if (string.IsNullOrEmpty(bootstrapIpcPort))
+                    throw new Exception("The bootstrap's remoting service has not been started.");
 
                 //Setup and then start the remote server instance
-                var ret = appServer.Setup(ServerTypeName, "ipc://" + ProcessBootstrap.BootstrapIpcPort + "/Bootstrap.rem", currentDomain.BaseDirectory, ServerConfig, Factories);
+                var ret = appServer.Setup(ServerTypeName, "ipc://" + bootstrapIpcPort + "/Bootstrap.rem", currentDomain.BaseDirectory, ServerConfig, Factories);
 
                 if (!ret)
                 {
                     ShutdownProcess();
+                    OnExceptionThrown(new Exception("The remote work item failed to setup!"));
                     return null;
                 }
 
@@ -113,18 +127,40 @@ namespace SuperSocket.SocketEngine
                 if (!ret)
                 {
                     ShutdownProcess();
+                    OnExceptionThrown(new Exception("The remote work item failed to start!"));
                     return null;
                 }
 
                 m_Locker.SaveLock(m_WorkingProcess);
             }
 
-            m_ServerTag = portName;
-
             m_WorkingProcess.EnableRaisingEvents = true;
             m_WorkingProcess.Exited += new EventHandler(m_WorkingProcess_Exited);
 
             return appServer;
+        }
+
+        void m_WorkingProcess_OutputDataReceived(object sender, DataReceivedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(e.Data))
+                return;
+
+            if (string.IsNullOrEmpty(m_ProcessWorkStatus))
+            {
+                m_ProcessWorkStatus = e.Data;
+                m_ProcessWorkEvent.Set();
+                return;
+            }
+
+            Console.WriteLine(string.Format("{0}: {1}", m_ServerTag, e.Data));
+        }
+
+        void m_WorkingProcess_ErrorDataReceived(object sender, DataReceivedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(e.Data))
+                return;
+
+            OnExceptionThrown(new Exception(e.Data));
         }
 
         void m_WorkingProcess_Exited(object sender, EventArgs e)
@@ -139,6 +175,7 @@ namespace SuperSocket.SocketEngine
 
             base.OnStopped();
             m_WorkingProcess = null;
+            m_ProcessWorkStatus = string.Empty;
 
             if (unexpectedShutdown)
             {

@@ -71,9 +71,11 @@
     <Compile Include="..\Solution Items\GlobalAssemblyInfo.cs">
       <Link>GlobalAssemblyInfo.cs</Link>
     </Compile>
+    <Compile Include="AppServerBase.SystemEndPoint.cs" />
     <Compile Include="Async.cs" />
     <Compile Include="CommandExecutingContext.cs" />
     <Compile Include="IStatusInfoSource.cs" />
+    <Compile Include="ISystemEndPoint.cs" />
     <Compile Include="Metadata\CommandFilterAttribute.cs" />
     <Compile Include="Command\CommandLoaderBase.cs" />
     <Compile Include="Command\CommandInfo.cs" />
@@ -88,7 +90,7 @@
     <Compile Include="Config\TypeProviderConfig.cs" />
     <Compile Include="Extensions.cs" />
     <Compile Include="IWorkItem.cs" />
-    <Compile Include="Metadata\StatusInfoMetadata.cs" />
+    <Compile Include="Metadata\StatusInfoAttribute.cs" />
     <Compile Include="IBootstrap.cs" />
     <Compile Include="ILoggerProvider.cs" />
     <Compile Include="IsolationMode.cs" />
@@ -99,6 +101,8 @@
     <Compile Include="Logging\Log4NetLog.cs" />
     <Compile Include="Logging\Log4NetLogFactory.cs" />
     <Compile Include="Logging\LogFactoryBase.cs" />
+    <Compile Include="Metadata\DefaultAppServerMetadata.cs" />
+    <Compile Include="Metadata\AppServerMetadataTypeAttribute.cs" />
     <Compile Include="NodeStatus.cs" />
     <Compile Include="Protocol\FilterState.cs" />
     <Compile Include="Protocol\IReceiveFilterInitializer.cs" />

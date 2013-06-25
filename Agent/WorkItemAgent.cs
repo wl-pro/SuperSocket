@@ -87,7 +87,7 @@ namespace SuperSocket.Agent
             get { return m_AppServer.SessionCount; }
         }
 
-        StatusInfoMetadata[] IStatusInfoSource.GetServerStatusMetadata()
+        StatusInfoAttribute[] IStatusInfoSource.GetServerStatusMetadata()
         {
             return m_AppServer.GetServerStatusMetadata();
         }
@@ -118,6 +118,16 @@ namespace SuperSocket.Agent
         public override object InitializeLifetimeService()
         {
             return null;
+        }
+
+        /// <summary>
+        /// Transfers the system message.
+        /// </summary>
+        /// <param name="messageType">Type of the message.</param>
+        /// <param name="messageData">The message data.</param>
+        public void TransferSystemMessage(string messageType, object messageData)
+        {
+            m_AppServer.TransferSystemMessage(messageType, messageData);
         }
     }
 }

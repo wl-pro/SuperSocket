@@ -27,13 +27,17 @@ namespace SuperSocket.SocketEngine
 
         private IWorkItem[] m_AppServers;
 
-        private StatusInfoMetadata[][] m_ServerStatusMetadatas;
+        private IWorkItem m_ServerManager;
 
-        public PerformanceMonitor(IRootConfig config, IEnumerable<IWorkItem> appServers, ILogFactory logFactory)
+        private List<KeyValuePair<string, StatusInfoAttribute[]>> m_ServerStatusMetadataSource;
+
+        public PerformanceMonitor(IRootConfig config, IEnumerable<IWorkItem> appServers, IWorkItem serverManager, ILogFactory logFactory)
         {
             m_PerfLog = logFactory.GetLog("Performance");
 
             m_AppServers = appServers.ToArray();
+
+            m_ServerManager = serverManager;
 
             Process process = Process.GetCurrentProcess();
 
@@ -50,11 +54,31 @@ namespace SuperSocket.SocketEngine
 
         private void SetupServerStatusMetadata()
         {
-            m_ServerStatusMetadatas = new StatusInfoMetadata[m_AppServers.Length][];
+            m_ServerStatusMetadataSource = new List<KeyValuePair<string, StatusInfoAttribute[]>>(m_AppServers.Length + 1);
+
+            m_ServerStatusMetadataSource.Add(
+                new KeyValuePair<string, StatusInfoAttribute[]>(string.Empty, 
+                    new StatusInfoAttribute[]
+                    {
+                        new StatusInfoAttribute("CpuUsage") { Name = "CPU Usage", Format = "{0:0.00}%", Order = 0 },
+                        new StatusInfoAttribute("WorkingSet") { Name = "Physical Memory Usage", Format = "{0:N}", Order = 1 },
+                        new StatusInfoAttribute("TotalThreadCount") { Name = "Total Thread Count", Order = 2 },
+                        new StatusInfoAttribute("AvailableWorkingThreads") { Name = "Available Working Threads", Order = 3 },
+                        new StatusInfoAttribute("AvailableCompletionPortThreads") { Name = "Available Completion Port Threads", Order = 4 },
+                        new StatusInfoAttribute("MaxWorkingThreads") { Name = "Maximum Working Threads", Order = 5 },
+                        new StatusInfoAttribute("MaxCompletionPortThreads") { Name = "Maximum Completion Port Threads", Order = 6 }
+                    }));
 
             for (var i = 0; i < m_AppServers.Length; i++)
             {
-                m_ServerStatusMetadatas[i] = m_AppServers[i].GetServerStatusMetadata();
+                var server = m_AppServers[i];
+                m_ServerStatusMetadataSource.Add(
+                    new KeyValuePair<string, StatusInfoAttribute[]>(server.Name, server.GetServerStatusMetadata()));
+            }
+
+            if (m_ServerManager != null && m_ServerManager.State == ServerState.Running)
+            {
+                m_ServerManager.TransferSystemMessage("ServerMetadataCollected", m_ServerStatusMetadataSource);
             }
         }
 
@@ -163,18 +187,7 @@ namespace SuperSocket.SocketEngine
             {
                 var s = m_AppServers[i];
 
-                var metadata = m_ServerStatusMetadatas[i];
-
-                if (s is IsolationAppServer)
-                {
-                    var newMetadata = s.GetServerStatusMetadata();
-
-                    if (newMetadata != metadata)
-                    {
-                        m_ServerStatusMetadatas[i] = newMetadata;
-                        metadata = newMetadata;
-                    }
-                }
+                var metadata = m_ServerStatusMetadataSource[i + 1].Value;
 
                 if (metadata == null)
                 {
@@ -210,14 +223,11 @@ namespace SuperSocket.SocketEngine
 
             m_PerfLog.Info(perfBuilder.ToString());
 
-            try
+            nodeStatus.InstancesStatus = instancesStatus.ToArray();
+
+            if (m_ServerManager != null && m_ServerManager.State == ServerState.Running)
             {
-                nodeStatus.InstancesStatus = instancesStatus.ToArray();
-                nodeStatus.Save(System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "status.bin"));
-            }
-            catch (Exception e)
-            {
-                m_PerfLog.Error(e);
+                m_ServerManager.TransferSystemMessage("ServerStatusCollected", nodeStatus);
             }
         }
 
