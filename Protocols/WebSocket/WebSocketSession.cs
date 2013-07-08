@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
 using System.Net;
+using System.Security.Authentication;
 using System.Text;
 using SuperSocket.Common;
 using SuperSocket.SocketBase;
@@ -225,7 +226,13 @@ namespace SuperSocket.WebSocket
         /// </summary>
         public string UriScheme
         {
-            get { return AppServer.UriScheme; }
+            get
+            {
+                if (SocketSession.SecureProtocol == SslProtocols.None)
+                    return WebSocketConstant.WsSchema;
+                else
+                    return WebSocketConstant.WssSchema;
+            }
         }
 
         /// <summary>
@@ -366,40 +373,6 @@ namespace SuperSocket.WebSocket
             base.Send(data, offset, length);
         }
 
-        /// <summary>
-        /// Sends the response.
-        /// </summary>
-        /// <param name="message">The message.</param>
-        /// <returns></returns>
-        [Obsolete("Use 'Send(string message)' instead")]
-        public override void SendResponse(string message)
-        {
-            this.Send(message);
-        }
-
-        /// <summary>
-        /// Sends the response.
-        /// </summary>
-        /// <param name="data">The data.</param>
-        /// <param name="offset">The offset.</param>
-        /// <param name="length">The length.</param>
-        /// <returns></returns>
-        [Obsolete("Use 'Send(byte[] data, int offset, int length)' instead")]
-        public override void SendResponse(byte[] data, int offset, int length)
-        {
-            this.Send(data, offset, length);
-        }
-
-        /// <summary>
-        /// Sends the response.
-        /// </summary>
-        /// <param name="segment">The segment.</param>
-        /// <returns></returns>
-        [Obsolete("Use 'Send(ArraySegment<byte> segment)' instead")]
-        public override void SendResponse(ArraySegment<byte> segment)
-        {
-            this.Send(segment);
-        }
 
         /// <summary>
         /// Closes the with handshake.
