@@ -14,7 +14,7 @@ namespace SuperSocket.SocketEngine
 {
     abstract class IsolationAppServer : MarshalByRefObject, IWorkItem, IStatusInfoSource, IExceptionSource, IDisposable
     {
-        protected const string WorkingDir = "InstancesRoot";
+        protected const string WorkingDir = "AppRoot";
 
         protected string ServerTypeName { get; private set; }
 
@@ -36,7 +36,36 @@ namespace SuperSocket.SocketEngine
         {
             State = ServerState.NotInitialized;
             ServerTypeName = serverTypeName;
-            m_ServerStatusMetadata = serverStatusMetadata;
+            m_ServerStatusMetadata = PrepareStatusMetadata(serverStatusMetadata);
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether [status metadata extended].
+        /// </summary>
+        /// <value>
+        /// <c>true</c> if [status metadata extended]; otherwise, <c>false</c>.
+        /// </value>
+        protected virtual bool StatusMetadataExtended
+        {
+            get { return false; }
+        }
+
+        private StatusInfoAttribute[] PrepareStatusMetadata(StatusInfoAttribute[] serverStatusMetadata)
+        {
+            if (!StatusMetadataExtended)
+                return serverStatusMetadata;
+
+            var additionalAttrs = this.GetType()
+                            .GetCustomAttributes(typeof(StatusInfoAttribute), true)
+                            .OfType<StatusInfoAttribute>()
+                            .ToArray();
+
+            if (additionalAttrs.Length == 0)
+                return serverStatusMetadata;
+
+            var list = serverStatusMetadata.ToList();
+            list.AddRange(additionalAttrs);
+            return list.ToArray();
         }
 
         protected AppDomain CreateHostAppDomain()
@@ -156,7 +185,7 @@ namespace SuperSocket.SocketEngine
 
         private StatusInfoCollection GetStoppedStatus()
         {
-            if (m_StoppedStatus != null)
+            if (m_StoppedStatus == null)
             {
                 m_StoppedStatus = new StatusInfoCollection();
                 m_StoppedStatus.Name = Name;

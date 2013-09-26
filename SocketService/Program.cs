@@ -24,7 +24,11 @@ namespace SuperSocket.SocketService
         /// The main entry point for the application.
         /// </summary>
         static void Main(string[] args)
-        {            
+        {
+            //If this application run in Mono/Linux, change the control script to be executable
+            if(Platform.IsMono && Path.DirectorySeparatorChar == '/')
+                ChangeScriptExecutable();
+
             if ((!Platform.IsMono && !Environment.UserInteractive)//Windows Service
                 || (Platform.IsMono && !AppDomain.CurrentDomain.FriendlyName.Equals(Path.GetFileName(Assembly.GetEntryAssembly().CodeBase))))//MonoService
             {
@@ -60,6 +64,23 @@ namespace SuperSocket.SocketService
                     exeArg = exeArg.TrimStart('-');
 
                 Run(exeArg, args);
+            }
+        }
+
+        static void ChangeScriptExecutable()
+        {
+            var filePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "supersocket.sh");
+
+            try
+            {
+                if (!File.Exists(filePath))
+                    return;
+
+                File.SetAttributes(filePath, (FileAttributes)((uint)File.GetAttributes(filePath) | 0x80000000));
+            }
+            catch
+            {
+
             }
         }
 
@@ -233,7 +254,7 @@ namespace SuperSocket.SocketService
 
             try
             {
-                var remoteBootstrapUri = string.Format("ipc://SuperSocket.Bootstrap[{0}]/Bootstrap.rem", Math.Abs(AppDomain.CurrentDomain.BaseDirectory.GetHashCode()));
+                var remoteBootstrapUri = string.Format("ipc://SuperSocket.Bootstrap[{0}]/Bootstrap.rem", Math.Abs(AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar).GetHashCode()));
                 bootstrap = (IBootstrap)Activator.GetObject(typeof(IBootstrap), remoteBootstrapUri);
             }
             catch (RemotingException)
@@ -272,7 +293,12 @@ namespace SuperSocket.SocketService
         {
             foreach (var s in bootstrap.AppServers)
             {
-                Console.WriteLine("{0} - {1}", s.Name, s.State);
+                var processInfo = s as IProcessServer;
+
+                if (processInfo != null && processInfo.ProcessId > 0)
+                    Console.WriteLine("{0}[PID:{1}] - {2}", s.Name, processInfo.ProcessId, s.State);
+                else
+                    Console.WriteLine("{0} - {1}", s.Name, s.State);
             }
 
             return false;
@@ -355,7 +381,7 @@ namespace SuperSocket.SocketService
             }
             catch (Exception e)
             {
-                Console.WriteLine("Failed. " + e.Message);
+                Console.WriteLine("Failed. " + e.Message + Environment.NewLine + e.StackTrace);
             }
 
             ReadConsoleCommand(bootstrap);

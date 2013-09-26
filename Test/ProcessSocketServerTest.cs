@@ -10,7 +10,7 @@ using System.IO;
 namespace SuperSocket.Test
 {
     [TestFixture]
-    public class ProcessSocketServerTest : TcpSocketServerTest
+    public class ProcessSocketServerTest : SocketServerTest
     {
         protected override string DefaultServerConfig
         {
@@ -44,7 +44,12 @@ namespace SuperSocket.Test
 
                     var line = reader.ReadLine();
 
-                    Assert.AreEqual("SuperSocket.Agent", line);
+                    var pars = line.Split(',');
+                    var appDomainName = pars[0];
+                    var appDomainRoot = pars[1];
+
+                    Assert.AreEqual("SuperSocket.Agent.exe", appDomainName);
+                    Assert.AreEqual(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "AppRoot", serverConfig.Name), appDomainRoot);
                 }
             }
         }
