@@ -76,7 +76,6 @@
       <Link>GlobalAssemblyInfo.cs</Link>
     </Compile>
     <Compile Include="AppServerBase.Net45.cs" />
-    <Compile Include="AppServerBase.SystemEndPoint.cs" />
     <Compile Include="Async.cs" />
     <Compile Include="CommandExecutingContext.cs" />
     <Compile Include="Command\CommandLoaderBase.cs" />
@@ -95,6 +94,7 @@
     <Compile Include="Config\TypeProviderCollection.cs" />
     <Compile Include="Config\TypeProviderConfig.cs" />
     <Compile Include="Extensions.cs" />
+    <Compile Include="IActiveConnector.cs" />
     <Compile Include="IBootstrap.cs" />
     <Compile Include="ILoggerProvider.cs" />
     <Compile Include="IsolationMode.cs" />
