@@ -11,6 +11,7 @@ using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Config;
 using SuperSocket.SocketBase.Logging;
 using SuperSocket.SocketBase.Protocol;
+using SuperSocket.ProtoBase;
 
 namespace SuperSocket.SocketBase
 {
@@ -19,7 +20,7 @@ namespace SuperSocket.SocketBase
     /// </summary>
     /// <typeparam name="TAppSession">The type of the app session.</typeparam>
     /// <typeparam name="TRequestInfo">The type of the request info.</typeparam>
-    public abstract class AppSession<TAppSession, TRequestInfo> : IAppSession, IAppSession<TAppSession, TRequestInfo>
+    public abstract class AppSession<TAppSession, TRequestInfo> : IAppSession, IAppSession<TAppSession, TRequestInfo>, IPackageHandler<TRequestInfo>, IThreadExecutingContext
         where TAppSession : AppSession<TAppSession, TRequestInfo>, IAppSession, new()
         where TRequestInfo : class, IRequestInfo
     {
@@ -161,8 +162,6 @@ namespace SuperSocket.SocketBase
             get { return AppServer.Config; }
         }
 
-        IReceiveFilter<TRequestInfo> m_ReceiveFilter;
-
         #endregion
 
         /// <summary>
@@ -188,15 +187,17 @@ namespace SuperSocket.SocketBase
             SocketSession = socketSession;
             SessionID = socketSession.SessionID;
             m_Connected = true;
-            m_ReceiveFilter = castedAppServer.ReceiveFilterFactory.CreateFilter(appServer, this, socketSession.RemoteEndPoint);
-
-            var filterInitializer = m_ReceiveFilter as IReceiveFilterInitializer;
-            if (filterInitializer != null)
-                filterInitializer.Initialize(castedAppServer, this);
-
+            
             socketSession.Initialize(this);
 
             OnInit();
+        }
+
+        IPipelineProcessor IAppSession.CreatePipelineProcessor()
+        {
+            var receiveFilterFactory = AppServer.ReceiveFilterFactory;
+            var receiveFilter = receiveFilterFactory.CreateFilter(AppServer, this, SocketSession.RemoteEndPoint);
+            return new DefaultPipelineProcessor<TRequestInfo>(this, receiveFilter, AppServer.Config.MaxRequestLength, SocketSession as IBufferRecycler);
         }
 
         /// <summary>
@@ -212,7 +213,7 @@ namespace SuperSocket.SocketBase
         /// </summary>
         protected virtual void OnInit()
         {
-            
+
         }
 
         /// <summary>
@@ -239,7 +240,7 @@ namespace SuperSocket.SocketBase
         /// <param name="e">The exception.</param>
         protected virtual void HandleException(Exception e)
         {
-            Logger.Error(this, e);
+            Logger.Error(e.Message, e, this);
             this.Close(CloseReason.ApplicationError);
         }
 
@@ -361,7 +362,7 @@ namespace SuperSocket.SocketBase
             //Don't retry, timeout directly
             if (sendTimeOut < 0)
             {
-                throw new Exception("The sending attempt timed out");
+                throw new TimeoutException("The sending attempt timed out");
             }
 
             var timeOutTime = sendTimeOut > 0 ? DateTime.Now.AddMilliseconds(sendTimeOut) : DateTime.Now;
@@ -378,7 +379,7 @@ namespace SuperSocket.SocketBase
                 //If sendTimeOut = 0, don't have timeout check
                 if (sendTimeOut > 0 && DateTime.Now >= timeOutTime)
                 {
-                    throw new Exception("The sending attempt timed out");
+                    throw new TimeoutException("The sending attempt timed out");
                 }
             }
         }
@@ -402,7 +403,7 @@ namespace SuperSocket.SocketBase
         }
 
         /// <summary>
-        /// Try to send the data segments to clinet.
+        /// Try to send the data segments to client.
         /// </summary>
         /// <param name="segments">The segments.</param>
         /// <returns>Indicate whether the message was pushed into the sending queue; if it returns false, the sending queue may be full or the socket is not connected</returns>
@@ -427,7 +428,7 @@ namespace SuperSocket.SocketBase
             //Don't retry, timeout directly
             if (sendTimeOut < 0)
             {
-                throw new Exception("The sending attempt timed out");
+                throw new TimeoutException("The sending attempt timed out");
             }
 
             var timeOutTime = sendTimeOut > 0 ? DateTime.Now.AddMilliseconds(sendTimeOut) : DateTime.Now;
@@ -444,13 +445,13 @@ namespace SuperSocket.SocketBase
                 //If sendTimeOut = 0, don't have timeout check
                 if (sendTimeOut > 0 && DateTime.Now >= timeOutTime)
                 {
-                    throw new Exception("The sending attempt timed out");
+                    throw new TimeoutException("The sending attempt timed out");
                 }
             }
         }
 
         /// <summary>
-        /// Sends the data segments to clinet.
+        /// Sends the data segments to client.
         /// </summary>
         /// <param name="segments">The segments.</param>
         public virtual void Send(IList<ArraySegment<byte>> segments)
@@ -471,116 +472,56 @@ namespace SuperSocket.SocketBase
 
         #endregion
 
-        #region Receiving processing
-
-        /// <summary>
-        /// Sets the next Receive filter which will be used when next data block received
-        /// </summary>
-        /// <param name="nextReceiveFilter">The next receive filter.</param>
-        protected void SetNextReceiveFilter(IReceiveFilter<TRequestInfo> nextReceiveFilter)
+        void IPackageHandler<TRequestInfo>.Handle(TRequestInfo package)
         {
-            m_ReceiveFilter = nextReceiveFilter;
+            try
+            {
+                AppServer.ExecuteCommand(this, package);
+            }
+            catch (Exception e)
+            {
+                HandleException(e);
+            }
         }
 
+
+        #region IThreadExecutingContext
+
+        private int m_PreferedThreadId;
+
         /// <summary>
-        /// Filters the request.
+        /// Gets or sets the prefered executing thread's id.
         /// </summary>
-        /// <param name="readBuffer">The read buffer.</param>
-        /// <param name="offset">The offset.</param>
-        /// <param name="length">The length.</param>
-        /// <param name="toBeCopied">if set to <c>true</c> [to be copied].</param>
-        /// <param name="rest">The rest, the size of the data which has not been processed</param>
-        /// <param name="offsetDelta">return offset delta of next receiving buffer.</param>
-        /// <returns></returns>
-        TRequestInfo FilterRequest(byte[] readBuffer, int offset, int length, bool toBeCopied, out int rest, out int offsetDelta)
+        /// <value>
+        /// The prefered thread id.
+        /// </value>
+        int IThreadExecutingContext.PreferedThreadId
         {
-            if (!AppServer.OnRawDataReceived(this, readBuffer, offset, length))
-            {
-                rest = 0;
-                offsetDelta = 0;
-                return null;
-            }
-
-            var currentRequestLength = m_ReceiveFilter.LeftBufferSize;
-
-            var requestInfo = m_ReceiveFilter.Filter(readBuffer, offset, length, toBeCopied, out rest);
-
-            if (m_ReceiveFilter.State == FilterState.Error)
-            {
-                rest = 0;
-                offsetDelta = 0;
-                Close(CloseReason.ProtocolError);
-                return null;
-            }
-
-            var offsetAdapter = m_ReceiveFilter as IOffsetAdapter;
-
-            offsetDelta = offsetAdapter != null ? offsetAdapter.OffsetDelta : 0;
-
-            if (requestInfo == null)
-            {
-                //current buffered length
-                currentRequestLength = m_ReceiveFilter.LeftBufferSize;
-            }
-            else
-            {
-                //current request length
-                currentRequestLength = currentRequestLength + length - rest;
-            }
-
-            if (currentRequestLength >= AppServer.Config.MaxRequestLength)
-            {
-                if (Logger.IsErrorEnabled)
-                    Logger.Error(this, string.Format("Max request length: {0}, current processed length: {1}", AppServer.Config.MaxRequestLength, currentRequestLength));
-                Close(CloseReason.ProtocolError);
-                return null;
-            }
-
-            //If next Receive filter wasn't set, still use current Receive filter in next round received data processing
-            if (m_ReceiveFilter.NextReceiveFilter != null)
-                m_ReceiveFilter = m_ReceiveFilter.NextReceiveFilter;
-
-            return requestInfo;
+            get { return m_PreferedThreadId; }
+            set { m_PreferedThreadId = value; }
         }
 
-        /// <summary>
-        /// Processes the request data.
-        /// </summary>
-        /// <param name="readBuffer">The read buffer.</param>
-        /// <param name="offset">The offset.</param>
-        /// <param name="length">The length.</param>
-        /// <param name="toBeCopied">if set to <c>true</c> [to be copied].</param>
-        /// <returns>
-        /// return offset delta of next receiving buffer
-        /// </returns>
-        int IAppSession.ProcessRequest(byte[] readBuffer, int offset, int length, bool toBeCopied)
+        void IThreadExecutingContext.Increment(int value)
         {
-            int rest, offsetDelta;
-
             while (true)
             {
-                var requestInfo = FilterRequest(readBuffer, offset, length, toBeCopied, out rest, out offsetDelta);
+                var oldValue = m_PreferedThreadId;
+                var targetValue = oldValue + value;
 
-                if (requestInfo != null)
-                {
-                    try
-                    {
-                        AppServer.ExecuteCommand(this, requestInfo);
-                    }
-                    catch (Exception e)
-                    {
-                        HandleException(e);
-                    }
-                }
+                if (Interlocked.CompareExchange(ref m_PreferedThreadId, targetValue, oldValue) == oldValue)
+                    return;
+            }
+        }
 
-                if (rest <= 0)
-                {
-                    return offsetDelta;
-                }
+        void IThreadExecutingContext.Decrement(int value)
+        {
+            while (true)
+            {
+                var oldValue = m_PreferedThreadId;
+                var targetValue = Math.Max(0, oldValue - value);
 
-                //Still have data has not been processed
-                offset = offset + length - rest;
-                length = rest;
+                if (Interlocked.CompareExchange(ref m_PreferedThreadId, targetValue, oldValue) == oldValue)
+                    return;
             }
         }
 

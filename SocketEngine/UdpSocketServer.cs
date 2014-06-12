@@ -6,10 +6,10 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using SuperSocket.Common;
+using SuperSocket.ProtoBase;
 using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Protocol;
-using SuperSocket.SocketEngine.AsyncSocket;
 
 namespace SuperSocket.SocketEngine
 {
@@ -54,11 +54,10 @@ namespace SuperSocket.SocketEngine
         /// <param name="state">The state.</param>
         protected override void OnNewClientAccepted(ISocketListener listener, Socket client, object state)
         {
-            var paramArray = state as object[];
+            var eventArgs = state as SocketAsyncEventArgs;
 
-            var receivedData = paramArray[0] as byte[];
-            var socketAddress = paramArray[1] as SocketAddress;
-            var remoteEndPoint = (socketAddress.Family == AddressFamily.InterNetworkV6 ? m_EndPointIPv6.Create(socketAddress) : m_EndPointIPv4.Create(socketAddress)) as IPEndPoint;
+            var remoteEndPoint = eventArgs.RemoteEndPoint as IPEndPoint;
+            var receivedData = new ArraySegment<byte>(eventArgs.Buffer, eventArgs.Offset, eventArgs.BytesTransferred);
 
             try
             {
@@ -76,23 +75,30 @@ namespace SuperSocket.SocketEngine
                 if (AppServer.Logger.IsErrorEnabled)
                     AppServer.Logger.Error("Process UDP package error!", e);
             }
+            finally
+            {
+                SaePool.Return(eventArgs.UserToken as SaeState);
+            }
         }
 
-        void ProcessPackageWithSessionID(Socket listenSocket, IPEndPoint remoteEndPoint, byte[] receivedData)
+        void ProcessPackageWithSessionID(Socket listenSocket, IPEndPoint remoteEndPoint, ArraySegment<byte> receivedData)
         {
             TRequestInfo requestInfo;
-            
+
             string sessionID;
 
             int rest;
 
             try
             {
-                requestInfo = this.m_UdpRequestFilter.Filter(receivedData, 0, receivedData.Length, false, out rest);
+                var receiveData = new BufferList();
+                receiveData.Add(receivedData);
+
+                requestInfo = this.m_UdpRequestFilter.Filter(receiveData, out rest);
             }
             catch (Exception exc)
             {
-                if(AppServer.Logger.IsErrorEnabled)
+                if (AppServer.Logger.IsErrorEnabled)
                     AppServer.Logger.Error("Failed to parse UDP package!", exc);
                 return;
             }
@@ -156,7 +162,7 @@ namespace SuperSocket.SocketEngine
             m_RequestHandler.ExecuteCommand(appSession, requestInfo);
         }
 
-        void ProcessPackageWithoutSessionID(Socket listenSocket, IPEndPoint remoteEndPoint, byte[] receivedData)
+        void ProcessPackageWithoutSessionID(Socket listenSocket, IPEndPoint remoteEndPoint, ArraySegment<byte> receivedData)
         {
             var sessionID = remoteEndPoint.ToString();
             var appSession = AppServer.GetSessionByID(sessionID);
@@ -182,13 +188,9 @@ namespace SuperSocket.SocketEngine
                 Interlocked.Increment(ref m_ConnectionCount);
                 socketSession.Closed += OnSocketSessionClosed;
                 socketSession.Start();
+            }
 
-                appSession.ProcessRequest(receivedData, 0, receivedData.Length, false);
-            }
-            else //Existing session
-            {
-                appSession.ProcessRequest(receivedData, 0, receivedData.Length, false);
-            }
+            ((UdpSocketSession)appSession.SocketSession).ProcessReceivedData(receivedData, null);
         }
 
         void OnSocketSessionClosed(ISocketSession socketSession, CloseReason closeReason)
@@ -212,7 +214,7 @@ namespace SuperSocket.SocketEngine
 
         protected override ISocketListener CreateListener(ListenerInfo listenerInfo)
         {
-            return new UdpSocketListener(listenerInfo);
+            return new UdpSocketListener(listenerInfo, SaePool);
         }
 
         public override void ResetSessionSecurity(IAppSession session, System.Security.Authentication.SslProtocols security)

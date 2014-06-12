@@ -7,11 +7,13 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using SuperSocket.Common;
+using SuperSocket.ProtoBase;
 using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Logging;
+using SuperSocket.SocketBase.Pool;
 using SuperSocket.SocketBase.Protocol;
-using SuperSocket.SocketEngine.AsyncSocket;
+using SuperSocket.SocketBase.Utils;
 
 namespace SuperSocket.SocketEngine
 {
@@ -19,32 +21,26 @@ namespace SuperSocket.SocketEngine
     {
         private bool m_IsReset;
 
+        private IPool<SaeState> m_SaePoolForReceive;
+
         private SocketAsyncEventArgs m_SocketEventArgSend;
 
-        public AsyncSocketSession(Socket client, SocketAsyncEventArgsProxy socketAsyncProxy)
-            : this(client, socketAsyncProxy, false)
+        public AsyncSocketSession(Socket client, IPool<SaeState> saePoolForReceive)
+            : this(client, saePoolForReceive, false)
         {
 
         }
 
-        public AsyncSocketSession(Socket client, SocketAsyncEventArgsProxy socketAsyncProxy, bool isReset)
+        public AsyncSocketSession(Socket client, IPool<SaeState> saePoolForReceive, bool isReset)
             : base(client)
         {
-            SocketAsyncProxy = socketAsyncProxy;
+            m_SaePoolForReceive = saePoolForReceive;
             m_IsReset = isReset;
-        }
-
-        ILog ILoggerProvider.Logger
-        {
-            get { return AppSession.Logger; }
         }
 
         public override void Initialize(IAppSession appSession)
         {
             base.Initialize(appSession);
-
-            //Initialize SocketAsyncProxy for receiving
-            SocketAsyncProxy.Initialize(this);
 
             if (!SyncSend)
             {
@@ -56,7 +52,11 @@ namespace SuperSocket.SocketEngine
 
         public override void Start()
         {
-            StartReceive(SocketAsyncProxy.SocketEventArgs);
+            var saeState = m_SaePoolForReceive.Get();
+            saeState.SocketSession = this;
+            saeState.Sae.UserToken = saeState;
+
+            StartReceive(saeState.Sae);
 
             if (!m_IsReset)
                 StartSession();
@@ -109,27 +109,13 @@ namespace SuperSocket.SocketEngine
             }
         }
 
-        private void StartReceive(SocketAsyncEventArgs e)
-        {
-            StartReceive(e, 0);
-        }
 
-        private void StartReceive(SocketAsyncEventArgs e, int offsetDelta)
+        private void StartReceive(SocketAsyncEventArgs e)
         {
             bool willRaiseEvent = false;
 
             try
             {
-                if (offsetDelta < 0 || offsetDelta >= Config.ReceiveBufferSize)
-                    throw new ArgumentException(string.Format("Illigal offsetDelta: {0}", offsetDelta), "offsetDelta");
-
-                var predictOffset = SocketAsyncProxy.OrigOffset + offsetDelta;
-
-                if (e.Offset != predictOffset)
-                {
-                    e.SetBuffer(predictOffset, Config.ReceiveBufferSize - offsetDelta);
-                }
-
                 if (IsInClosingOrClosed)
                     return;
 
@@ -211,43 +197,64 @@ namespace SuperSocket.SocketEngine
             }
         }
 
-        public SocketAsyncEventArgsProxy SocketAsyncProxy { get; private set; }
-
         public void ProcessReceive(SocketAsyncEventArgs e)
         {
+            var state = e.UserToken as SaeState;
+
             if (!ProcessCompleted(e))
             {
+                e.UserToken = null;
+                m_SaePoolForReceive.Return(state);
                 OnReceiveError(CloseReason.ClientClosing);
                 return;
             }
 
             OnReceiveEnded();
 
-            int offsetDelta;
+            var result = ProcessReceivedData(new ArraySegment<byte>(e.Buffer, e.Offset, e.BytesTransferred), state);
 
-            try
+            if (result.State == ProcessState.Cached)
             {
-                offsetDelta = this.AppSession.ProcessRequest(e.Buffer, e.Offset, e.BytesTransferred, true);
-            }
-            catch (Exception exc)
-            {
-                LogError("Protocol error", exc);
-                this.Close(CloseReason.ProtocolError);
-                return;
+                e.UserToken = null;
+                var newState = m_SaePoolForReceive.Get();
+                e = newState.Sae;
+                e.UserToken = newState;
+                newState.SocketSession = this;
             }
 
             //read the next block of data sent from the client
-            StartReceive(e, offsetDelta);
-        }      
+            StartReceive(e);
+        }
 
         public override void ApplySecureProtocol()
         {
             //TODO: Implement async socket SSL/TLS encryption
         }
 
-        public override int OrigReceiveOffset
+        protected override void OnClosed(CloseReason reason)
         {
-            get { return SocketAsyncProxy.OrigOffset; }
+            if (m_SocketEventArgSend != null)
+            {
+                m_SocketEventArgSend.Completed += new EventHandler<SocketAsyncEventArgs>(OnSendingCompleted);
+                m_SocketEventArgSend.Dispose();
+                m_SocketEventArgSend = null;
+            }
+
+            base.OnClosed(reason);
+        }
+
+        protected override void ReturnBuffer(IList<KeyValuePair<ArraySegment<byte>, IBufferState>> buffers, int offset, int length)
+        {
+            for (var i = 0; i < length; i++)
+            {
+                var buffer = buffers[offset + i];
+                var state = buffer.Value as SaeState;
+
+                if (state != null && state.DecreaseReference() == 0)
+                {
+                    m_SaePoolForReceive.Return(state);
+                }
+            }
         }
     }
 }

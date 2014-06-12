@@ -7,6 +7,7 @@ using System.Text;
 using SuperSocket.Common;
 using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Config;
+using SuperSocket.SocketBase.Pool;
 
 namespace SuperSocket.SocketEngine
 {
@@ -14,10 +15,12 @@ namespace SuperSocket.SocketEngine
     {
         private Socket m_ListenSocket;
 
-        public UdpSocketListener(ListenerInfo info)
+        private IPool<SaeState> m_SaePool;
+
+        public UdpSocketListener(ListenerInfo info, IPool<SaeState> saePool)
             : base(info)
         {
-
+            m_SaePool = saePool;
         }
 
         /// <summary>
@@ -45,16 +48,10 @@ namespace SuperSocket.SocketEngine
                     m_ListenSocket.IOControl((int)SIO_UDP_CONNRESET, optionInValue, optionOutValue);
                 }
 
-                var eventArgs = new SocketAsyncEventArgs();
-
-                eventArgs.Completed += new EventHandler<SocketAsyncEventArgs>(eventArgs_Completed);
-                eventArgs.RemoteEndPoint = new IPEndPoint(IPAddress.Any, 0);
-
-                int receiveBufferSize = config.ReceiveBufferSize <= 0 ? 2048 : config.ReceiveBufferSize;
-                var buffer = new byte[receiveBufferSize];
-                eventArgs.SetBuffer(buffer, 0, buffer.Length);
-
-                m_ListenSocket.ReceiveFromAsync(eventArgs);
+                var saeState = m_SaePool.Get();
+                var sae = saeState.Sae;
+                sae.Completed += new EventHandler<SocketAsyncEventArgs>(eventArgs_Completed);
+                m_ListenSocket.ReceiveFromAsync(sae);
 
                 return true;
             }
@@ -67,6 +64,8 @@ namespace SuperSocket.SocketEngine
 
         void eventArgs_Completed(object sender, SocketAsyncEventArgs e)
         {
+            e.Completed -= new EventHandler<SocketAsyncEventArgs>(eventArgs_Completed);
+
             if (e.SocketError != SocketError.Success)
             {
                 var errorCode = (int)e.SocketError;
@@ -82,20 +81,29 @@ namespace SuperSocket.SocketEngine
             {
                 try
                 {
-                    OnNewClientAcceptedAsync(m_ListenSocket, new object[] { e.Buffer.CloneRange(e.Offset, e.BytesTransferred), e.RemoteEndPoint.Serialize() });
+                    OnNewClientAcceptedAsync(m_ListenSocket, e);
                 }
                 catch (Exception exc)
                 {
                     OnError(exc);
+                    m_SaePool.Return(e.UserToken as SaeState);
                 }
+
+                SaeState newState = null;
 
                 try
                 {
-                    m_ListenSocket.ReceiveFromAsync(e);
+                    newState = m_SaePool.Get();
+                    var sae = newState.Sae;
+                    sae.Completed += new EventHandler<SocketAsyncEventArgs>(eventArgs_Completed);
+                    m_ListenSocket.ReceiveFromAsync(sae);
                 }
                 catch (Exception exc)
                 {
                     OnError(exc);
+
+                    if (newState != null)
+                        m_SaePool.Return(newState);
                 }
             }
         }

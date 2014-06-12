@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using SuperSocket.SocketBase.Metadata;
+using SuperSocket.SocketBase.Pool;
 
 namespace SuperSocket.SocketBase
 {
@@ -57,6 +58,18 @@ namespace SuperSocket.SocketBase
 
                 serverType = serverType.BaseType;
             }
+        }
+
+        /// <summary>
+        /// Creates the default pool item creator.
+        /// </summary>
+        /// <typeparam name="T"></typeparam>
+        /// <param name="pool">The pool.</param>
+        /// <returns></returns>
+        public static IPoolItemCreator<T> CreateDefaultPoolItemCreator<T>(this IPool<T> pool)
+            where T : new()
+        {
+            return new DefaultConstructorItemCreator<T>();
         }
     }
 }

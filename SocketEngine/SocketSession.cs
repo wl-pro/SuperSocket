@@ -9,10 +9,13 @@ using System.Security.Authentication;
 using System.Text;
 using System.Threading;
 using SuperSocket.Common;
+using SuperSocket.ProtoBase;
 using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Config;
+using SuperSocket.SocketBase.Pool;
 using SuperSocket.SocketBase.Protocol;
+using SuperSocket.SocketBase.Utils;
 
 namespace SuperSocket.SocketEngine
 {
@@ -29,11 +32,18 @@ namespace SuperSocket.SocketEngine
     /// <summary>
     /// Socket Session, all application session should base on this class
     /// </summary>
-    abstract partial class SocketSession : ISocketSession
+    abstract partial class SocketSession : ISocketSession, IBufferRecycler
     {
         public IAppSession AppSession { get; private set; }
 
+        protected IPipelineProcessor DataProcessor { get; private set; }
+
         protected readonly object SyncRoot = new object();
+
+        IPipelineProcessor ISocketSession.PipelineProcessor
+        {
+            get { return DataProcessor; }
+        }
 
         //0x00 0x00 0x00 0x00
         //1st byte: Closed(Y/N) - 0x01
@@ -47,12 +57,12 @@ namespace SuperSocket.SocketEngine
 
         private void AddStateFlag(int stateValue)
         {
-            while(true)
+            while (true)
             {
                 var oldState = m_State;
                 var newState = m_State | stateValue;
 
-                if(Interlocked.CompareExchange(ref m_State, newState, oldState) == oldState)
+                if (Interlocked.CompareExchange(ref m_State, newState, oldState) == oldState)
                     return;
             }
         }
@@ -79,12 +89,12 @@ namespace SuperSocket.SocketEngine
 
         private void RemoveStateFlag(int stateValue)
         {
-            while(true)
+            while (true)
             {
                 var oldState = m_State;
                 var newState = m_State & (~stateValue);
 
-                if(Interlocked.CompareExchange(ref m_State, newState, oldState) == oldState)
+                if (Interlocked.CompareExchange(ref m_State, newState, oldState) == oldState)
                     return;
             }
         }
@@ -96,7 +106,7 @@ namespace SuperSocket.SocketEngine
 
         protected bool SyncSend { get; private set; }
 
-        private ISmartPool<SendingQueue> m_SendingQueuePool;
+        private IPool<SendingQueue> m_SendingQueuePool;
 
         public SocketSession(Socket client)
             : this(Guid.NewGuid().ToString())
@@ -117,16 +127,16 @@ namespace SuperSocket.SocketEngine
         public virtual void Initialize(IAppSession appSession)
         {
             AppSession = appSession;
+
+            DataProcessor = appSession.CreatePipelineProcessor();
+
             Config = appSession.Config;
             SyncSend = Config.SyncSend;
             m_SendingQueuePool = ((SocketServerBase)((ISocketServerAccessor)appSession.AppServer).SocketServer).SendingQueuePool;
 
-            SendingQueue queue;
-            if (m_SendingQueuePool.TryGet(out queue))
-            {
-                m_SendingQueue = queue;
-                queue.StartEnqueue();
-            }
+            SendingQueue queue = m_SendingQueuePool.Get();
+            m_SendingQueue = queue;
+            queue.StartEnqueue();
         }
 
         /// <summary>
@@ -178,7 +188,7 @@ namespace SuperSocket.SocketEngine
                 if (Interlocked.CompareExchange(ref m_SendingQueue, null, sendingQueue) == sendingQueue)
                 {
                     sendingQueue.Clear();
-                    m_SendingQueuePool.Push(sendingQueue);
+                    m_SendingQueuePool.Return(sendingQueue);
                     break;
                 }
             }
@@ -204,6 +214,9 @@ namespace SuperSocket.SocketEngine
         /// <returns></returns>
         public bool TrySend(IList<ArraySegment<byte>> segments)
         {
+            if (IsClosed)
+                return false;
+
             var queue = m_SendingQueue;
             var trackID = queue.TrackID;
 
@@ -281,28 +294,22 @@ namespace SuperSocket.SocketEngine
                 }
             }
 
-            if (IsInClosingOrClosed && m_Client == null)
+            Socket client;
+
+            if (IsInClosingOrClosed && TryValidateClosedBySocket(out client))
             {
                 OnSendEnd(true);
                 return;
             }
 
-            SendingQueue newQueue;
-
-            if (!m_SendingQueuePool.TryGet(out newQueue))
-            {
-                AppSession.Logger.Error("There is no enougth sending queue can be used.");
-                OnSendEnd(false);
-                this.Close(CloseReason.InternalError);
-                return;
-            }
+            SendingQueue newQueue = m_SendingQueuePool.Get();
 
             var oldQueue = Interlocked.CompareExchange(ref m_SendingQueue, newQueue, queue);
 
             if (!ReferenceEquals(oldQueue, queue))
             {
                 if (newQueue != null)
-                    m_SendingQueuePool.Push(newQueue);
+                    m_SendingQueuePool.Return(newQueue);
 
                 if (IsInClosingOrClosed)
                 {
@@ -325,7 +332,7 @@ namespace SuperSocket.SocketEngine
             if (queue.Count == 0)
             {
                 AppSession.Logger.Error("There is no data to be sent in the queue.");
-                m_SendingQueuePool.Push(queue);
+                m_SendingQueuePool.Return(queue);
                 OnSendEnd(false);
                 this.Close(CloseReason.InternalError);
                 return;
@@ -345,15 +352,18 @@ namespace SuperSocket.SocketEngine
 
             if (isInClosingOrClosed)
             {
-                var client = m_Client;
-                //The socket has not been closed, close it now
-                if (client != null)
+                Socket client;
+
+                if (!TryValidateClosedBySocket(out client))
                 {
                     //No data to be sent
                     if (m_SendingQueue.Count == 0)
                     {
-                        //Not can close it now
-                        InternalClose(client, GetCloseReasonFromState(), false);
+                        if (client != null)// the socket instance is not closed yet, do it now
+                            InternalClose(client, GetCloseReasonFromState(), false);
+                        else// The UDP mode, the socket instance always is null, fire the closed event directly
+                            OnClosed(GetCloseReasonFromState());
+
                         return;
                     }
 
@@ -370,14 +380,16 @@ namespace SuperSocket.SocketEngine
         protected virtual void OnSendingCompleted(SendingQueue queue)
         {
             queue.Clear();
-            m_SendingQueuePool.Push(queue);
+            m_SendingQueuePool.Return(queue);
 
             var newQueue = m_SendingQueue;
 
             if (IsInClosingOrClosed)
             {
+                Socket client;
+
                 //has data is being sent and the socket isn't closed
-                if (newQueue.Count > 0 && m_Client != null)
+                if (newQueue.Count > 0 && !TryValidateClosedBySocket(out client))
                 {
                     StartSend(newQueue, newQueue.TrackID, false);
                     return;
@@ -447,16 +459,23 @@ namespace SuperSocket.SocketEngine
         /// <value>The secure protocol.</value>
         public SslProtocols SecureProtocol { get; set; }
 
+        protected virtual bool TryValidateClosedBySocket(out Socket socket)
+        {
+            socket = m_Client;
+            //Already closed/closing
+            return socket == null;
+        }
+
         public virtual void Close(CloseReason reason)
         {
             //Already in closing procedure
             if (!TryAddStateFlag(SocketState.InClosing))
                 return;
 
-            var client = m_Client;
+            Socket client;
 
-            //Already closed/closing
-            if (client == null)
+            //No need to clean the socket instance
+            if (TryValidateClosedBySocket(out client))
                 return;
 
             //Some data is in sending
@@ -467,7 +486,11 @@ namespace SuperSocket.SocketEngine
                 return;
             }
 
-            InternalClose(client, reason, true);
+            // In the udp mode, we needn't close the socket instance
+            if (client != null)
+                InternalClose(client, reason, true);
+            else //In Udp mode, and the socket is not in the sending state, then fire the closed event directly
+                OnClosed(reason);
         }
 
         private void InternalClose(Socket client, CloseReason reason, bool setCloseReason)
@@ -489,12 +512,12 @@ namespace SuperSocket.SocketEngine
         protected void OnSendError(SendingQueue queue, CloseReason closeReason)
         {
             queue.Clear();
-            m_SendingQueuePool.Push(queue);
+            m_SendingQueuePool.Return(queue);
             OnSendEnd();
             ValidateClosed(closeReason);
         }
 
-        protected void OnReceiveError(CloseReason closeReason)
+        protected virtual void OnReceiveError(CloseReason closeReason)
         {
             OnReceiveEnded();
             ValidateClosed(closeReason);
@@ -561,8 +584,6 @@ namespace SuperSocket.SocketEngine
             }
         }
 
-        public abstract int OrigReceiveOffset { get; }
-
         protected virtual bool IsIgnorableSocketError(int socketErrorCode)
         {
             if (socketErrorCode == 10004 //Interrupted
@@ -609,6 +630,57 @@ namespace SuperSocket.SocketEngine
                 return false;
 
             return IsIgnorableSocketError(socketErrorCode);
+        }
+
+        private const string m_SesionDataSlotName = "Session";
+
+        internal ProcessResult ProcessReceivedData(ArraySegment<byte> data, IBufferState state)
+        {
+            LocalDataStoreSlot slot = null;
+
+            try
+            {
+                slot = Thread.GetNamedDataSlot(m_SesionDataSlotName);
+                Thread.SetData(slot, this.AppSession);
+
+                var result = DataProcessor.Process(data, state);
+
+                if (result.State == ProcessState.Error)
+                {
+                    if (string.IsNullOrEmpty(result.Message))
+                        AppSession.Logger.Error("Protocol error");
+                    else
+                        AppSession.Logger.ErrorFormat("Protocol error: {0}", result.Message);
+
+                    this.Close(CloseReason.ProtocolError);
+                }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                LogError("Protocol error", ex);
+                this.Close(CloseReason.ProtocolError);
+                return ProcessResult.Create(ProcessState.Error);
+            }
+            finally
+            {
+                if (slot != null)
+                    Thread.SetData(slot, null);
+            }
+        }
+
+        /// <summary>
+        /// Returns the buffer.
+        /// </summary>
+        /// <param name="buffers">The buffers.</param>
+        /// <param name="offset">The offset.</param>
+        /// <param name="length">The length.</param>
+        protected abstract void ReturnBuffer(IList<KeyValuePair<ArraySegment<byte>, IBufferState>> buffers, int offset, int length);
+
+        void IBufferRecycler.Return(IList<KeyValuePair<ArraySegment<byte>, IBufferState>> buffers, int offset, int length)
+        {
+            ReturnBuffer(buffers, offset, length);
         }
     }
 }

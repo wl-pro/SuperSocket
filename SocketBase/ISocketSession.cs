@@ -1,11 +1,12 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
 using System.IO;
+using System.Linq;
 using System.Net;
-using System.Security.Authentication;
 using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Text;
+using SuperSocket.ProtoBase;
 using SuperSocket.SocketBase.Command;
 
 namespace SuperSocket.SocketBase
@@ -67,7 +68,7 @@ namespace SuperSocket.SocketBase
     public interface ISocketSession : ISessionBase
     {
         /// <summary>
-        /// Initializes the specified app session.
+        /// Initializes the socket session with the specified app session.
         /// </summary>
         /// <param name="appSession">The app session.</param>
         void Initialize(IAppSession appSession);
@@ -129,13 +130,12 @@ namespace SuperSocket.SocketBase
         /// </summary>
         IAppSession AppSession { get; }
 
-
         /// <summary>
-        /// Gets the original receive buffer offset.
+        /// Gets the pipeline processor.
         /// </summary>
         /// <value>
-        /// The original receive buffer offset.
+        /// The pipeline processor.
         /// </value>
-        int OrigReceiveOffset { get; }
+        IPipelineProcessor PipelineProcessor { get; }
     }
 }

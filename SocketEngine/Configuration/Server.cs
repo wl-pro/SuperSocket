@@ -85,22 +85,35 @@ namespace SuperSocket.SocketEngine.Configuration
         /// <value>
         /// The request handling mode.
         /// </value>
-        [ConfigurationProperty("requestHandlingMode", IsRequired = false, DefaultValue = "Pool")]
+        [ConfigurationProperty("requestHandlingMode", IsRequired = false, DefaultValue = "Default")]
         public RequestHandlingMode RequestHandlingMode
         {
             get { return (RequestHandlingMode)this["requestHandlingMode"]; }
         }
 
+
         /// <summary>
-        /// Gets the count of request handling threads, default value is 1, and only in used when RequestHandlingMode is 'MultipleThread'.
+        /// Gets the minimum count of request handling threads.
         /// </summary>
         /// <value>
-        /// Gets the count of request handling threads.
+        /// Gets the minimum count of request handling threads.
         /// </value>
-        [ConfigurationProperty("requestHandlingThreads", IsRequired = false, DefaultValue = 1)]
-        public int RequestHandlingThreads
+        [ConfigurationProperty("minRequestHandlingThreads", IsRequired = false, DefaultValue = ServerConfig.DefaultMinRequestHandlingThreads)]
+        public int MinRequestHandlingThreads
         {
-            get { return (int)this["requestHandlingThreads"]; }
+            get { return (int)this["minRequestHandlingThreads"]; }
+        }
+
+        /// <summary>
+        /// Gets the maximum request handling threads count.
+        /// </summary>
+        /// <value>
+        /// The maximum request handling threads count.
+        /// </value>
+        [ConfigurationProperty("maxRequestHandlingThreads", IsRequired = false, DefaultValue = ServerConfig.DefaultMaxRequestHandlingThreads)]
+        public int MaxRequestHandlingThreads
+        {
+            get { return (int)this["maxRequestHandlingThreads"]; }
         }
 
         /// <summary>
@@ -470,6 +483,25 @@ namespace SuperSocket.SocketEngine.Configuration
             get { return this.CommandAssemblies; }
         }
 
+        /// <summary>
+        /// Gets the buffer pools configuration.
+        /// </summary>
+        /// <value>
+        /// The buffer pools configuration.
+        /// </value>
+        [ConfigurationProperty("bufferPools", IsRequired = false)]
+        public BufferPoolConfigCollection BufferPools
+        {
+            get
+            {
+                return this["bufferPools"] as BufferPoolConfigCollection;
+            }
+        }
+
+        IEnumerable<IBufferPoolConfig> IServerConfig.BufferPools
+        {
+            get { return this.BufferPools; }
+        }
         /// <summary>
         /// Gets the child config.
         /// </summary>

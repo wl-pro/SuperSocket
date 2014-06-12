@@ -9,12 +9,14 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using SuperSocket.Common;
+using SuperSocket.ProtoBase;
 using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Config;
 using SuperSocket.SocketBase.Logging;
+using SuperSocket.SocketBase.Pool;
 using SuperSocket.SocketBase.Protocol;
-using SuperSocket.SocketEngine.AsyncSocket;
+using SuperSocket.SocketBase.Utils;
 
 namespace SuperSocket.SocketEngine
 {
@@ -51,30 +53,25 @@ namespace SuperSocket.SocketEngine
         event EventHandler NegotiateCompleted;
     }
 
-    class AsyncStreamSocketSession : SocketSession, IAsyncSocketSessionBase, INegotiateSocketSession
+    class AsyncStreamSocketSession : SocketSession, INegotiateSocketSession
     {
-        private byte[] m_ReadBuffer;
-        private int m_Offset;
-        private int m_Length;
-
         private bool m_IsReset;
 
-        public AsyncStreamSocketSession(Socket client, SslProtocols security, SocketAsyncEventArgsProxy socketAsyncProxy)
-            : this(client, security, socketAsyncProxy, false)
+        private IPool<BufferState> m_BufferStatePool;
+
+        private Stream m_Stream;
+
+        public AsyncStreamSocketSession(Socket client, SslProtocols security, IPool<BufferState> bufferStatePool)
+            : this(client, security, bufferStatePool, false)
         {
 
         }
 
-        public AsyncStreamSocketSession(Socket client, SslProtocols security, SocketAsyncEventArgsProxy socketAsyncProxy, bool isReset)
+        public AsyncStreamSocketSession(Socket client, SslProtocols security, IPool<BufferState> bufferStatePool, bool isReset)
             : base(client)
         {
             SecureProtocol = security;
-            SocketAsyncProxy = socketAsyncProxy;
-            var e = socketAsyncProxy.SocketEventArgs;
-            m_ReadBuffer = e.Buffer;
-            m_Offset = e.Offset;
-            m_Length = e.Count;
-
+            m_BufferStatePool = bufferStatePool;
             m_IsReset = isReset;
         }
 
@@ -94,8 +91,10 @@ namespace SuperSocket.SocketEngine
         {
             try
             {
+                var bufferState = m_BufferStatePool.Get();
                 OnReceiveStarted();
-                m_Stream.BeginRead(m_ReadBuffer, m_Offset, m_Length, OnStreamEndRead, m_Stream);
+                var buffer = bufferState.Buffer;
+                m_Stream.BeginRead(buffer, 0, buffer.Length, OnStreamEndRead, bufferState);
             }
             catch (Exception e)
             {
@@ -111,18 +110,17 @@ namespace SuperSocket.SocketEngine
 
         private void OnStreamEndRead(IAsyncResult result)
         {
-            var stream = result.AsyncState as Stream;
+            var bufferState = result.AsyncState as BufferState;
 
             int thisRead = 0;
 
             try
             {
-                thisRead = stream.EndRead(result);
+                thisRead = m_Stream.EndRead(result);
             }
             catch (Exception e)
             {
                 LogError(e);
-
                 OnReceiveError(CloseReason.SocketError);
                 return;
             }
@@ -135,29 +133,19 @@ namespace SuperSocket.SocketEngine
 
             OnReceiveEnded();
 
-            int offsetDelta;
+            var r = ProcessReceivedData(new ArraySegment<byte>(bufferState.Buffer, 0, thisRead), bufferState);
+
+            if (r.State == ProcessState.Cached)
+            {
+                bufferState = m_BufferStatePool.Get();
+            }
+
+            OnReceiveStarted();
 
             try
             {
-                offsetDelta = AppSession.ProcessRequest(m_ReadBuffer, m_Offset, thisRead, true);
-            }
-            catch (Exception ex)
-            {
-                LogError("Protocol error", ex);
-                this.Close(CloseReason.ProtocolError);
-                return;
-            }
-
-            try
-            {
-                if (offsetDelta < 0 || offsetDelta >= Config.ReceiveBufferSize)
-                    throw new ArgumentException(string.Format("Illigal offsetDelta: {0}", offsetDelta), "offsetDelta");
-
-                m_Offset = SocketAsyncProxy.OrigOffset + offsetDelta;
-                m_Length = Config.ReceiveBufferSize - offsetDelta;
-
-                OnReceiveStarted();
-                m_Stream.BeginRead(m_ReadBuffer, m_Offset, m_Length, OnStreamEndRead, m_Stream);
+                var buffer = bufferState.Buffer;
+                m_Stream.BeginRead(buffer, 0, buffer.Length, OnStreamEndRead, bufferState);
             }
             catch (Exception exc)
             {
@@ -167,12 +155,10 @@ namespace SuperSocket.SocketEngine
             }
         }
 
-        private Stream m_Stream;
-
         private SslStream CreateSslStream(ICertificateConfig certConfig)
         {
             //Enable client certificate function only if ClientCertificateRequired is true in the configuration
-            if(!certConfig.ClientCertificateRequired)
+            if (!certConfig.ClientCertificateRequired)
                 return new SslStream(new NetworkStream(Client), false);
 
             //Subscribe the client validation callback
@@ -326,7 +312,7 @@ namespace SuperSocket.SocketEngine
                 OnSendError(queue, CloseReason.SocketError);
                 return;
             }
-            
+
             var nextPos = queue.Position + 1;
 
             //Has more data to send
@@ -346,18 +332,6 @@ namespace SuperSocket.SocketEngine
 
             if (asyncResult != null)
                 asyncResult.AsyncWaitHandle.WaitOne();
-        }
-
-        public SocketAsyncEventArgsProxy SocketAsyncProxy { get; private set; }
-
-        ILog ILoggerProvider.Logger
-        {
-            get { return AppSession.Logger; }
-        }
-
-        public override int OrigReceiveOffset
-        {
-            get { return SocketAsyncProxy.OrigOffset; }
         }
 
         private bool m_NegotiateResult = false;
@@ -408,6 +382,20 @@ namespace SuperSocket.SocketEngine
                 return;
 
             handler(this, EventArgs.Empty);
+        }
+
+        protected override void ReturnBuffer(IList<KeyValuePair<ArraySegment<byte>, IBufferState>> buffers, int offset, int length)
+        {
+            for (var i = 0; i < length; i++)
+            {
+                var buffer = buffers[offset + i];
+                var state = buffer.Value as BufferState;
+
+                if (state != null && state.DecreaseReference() == 0)
+                {
+                    m_BufferStatePool.Return(state);
+                }
+            }
         }
     }
 }

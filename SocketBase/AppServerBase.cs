@@ -9,13 +9,18 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using SuperSocket.Common;
+using SuperSocket.ProtoBase;
 using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Config;
 using SuperSocket.SocketBase.Logging;
 using SuperSocket.SocketBase.Metadata;
+using SuperSocket.SocketBase.Pool;
 using SuperSocket.SocketBase.Protocol;
 using SuperSocket.SocketBase.Provider;
+using SuperSocket.SocketBase.Scheduler;
 using SuperSocket.SocketBase.Security;
+using SuperSocket.SocketBase.Utils;
+using SuperSocket.SocketBase.ServerResource;
 
 namespace SuperSocket.SocketBase
 {
@@ -65,6 +70,23 @@ namespace SuperSocket.SocketBase
         /// Gets the certificate of current server.
         /// </summary>
         public X509Certificate Certificate { get; private set; }
+
+        private ServerResourceItem[] m_ServerResources;
+
+        private IBufferManager m_BufferManager;
+
+        /// <summary>
+        /// Gets the buffer manager.
+        /// </summary>
+        /// <value>
+        /// The buffer manager.
+        /// </value>
+        IBufferManager IAppServer.BufferManager
+        {
+            get { return m_BufferManager; }
+        }
+
+        private IPool<RequestExecutingContext<TAppSession, TRequestInfo>> m_RequestExecutingContextPool;
 
         /// <summary>
         /// Gets or sets the receive filter factory.
@@ -431,27 +453,6 @@ namespace SuperSocket.SocketBase
                 }
             }
 
-            if (Config.RequestHandlingMode == RequestHandlingMode.Pool)
-            {
-                m_RequestHandlingTaskScheduler = TaskScheduler.Default;
-            }
-            else if (Config.RequestHandlingMode == RequestHandlingMode.SingleThread)
-            {
-                m_RequestHandlingTaskScheduler = new ThreadingTaskScheduler(1);
-            }
-            else
-            {
-                if (Config.RequestHandlingThreads <= 1 || Config.RequestHandlingThreads > 100)
-                {
-                    if (Logger.IsErrorEnabled)
-                        Logger.Error("RequestHandlingThreads must be between 2 and 100!");
-
-                    return false;
-                }
-
-                m_RequestHandlingTaskScheduler = new ThreadingTaskScheduler(Config.RequestHandlingThreads);
-            }
-
             var plainConfig = Config as ServerConfig;
 
             if (plainConfig == null)
@@ -495,6 +496,7 @@ namespace SuperSocket.SocketBase
             return SetupSocketServer();
         }
 
+        
         /// <summary>
         /// Setups with the specified port.
         /// </summary>
@@ -1079,6 +1081,8 @@ namespace SuperSocket.SocketBase
         /// </returns>
         public virtual bool Start()
         {
+            AppContext.SetCurrentServer(this);
+
             var origStateCode = Interlocked.CompareExchange(ref m_StateCode, ServerStateConst.Starting, ServerStateConst.NotStarted);
 
             if (origStateCode != ServerStateConst.NotStarted)
@@ -1092,9 +1096,35 @@ namespace SuperSocket.SocketBase
                 return false;
             }
 
-            if (!m_SocketServer.Start())
+            try
             {
-                m_StateCode = ServerStateConst.NotStarted;
+                using (var transaction = new LightweightTransaction())
+                {
+                    transaction.RegisterItem(
+                        ServerResourceItem.Create<RequestHandlingSchedulerResource, TaskScheduler>(
+                            (scheduler) => this.m_RequestHandlingTaskScheduler = scheduler, Config, () => this.m_RequestHandlingTaskScheduler));
+
+                    transaction.RegisterItem(
+                        ServerResourceItem.Create<BufferManagerResource, IBufferManager>(
+                            (bufferManager) => this.m_BufferManager = bufferManager, Config));
+
+                    transaction.RegisterItem(
+                        ServerResourceItem.Create<RequestExecutingContextPoolResource<TAppSession, TRequestInfo>, IPool<RequestExecutingContext<TAppSession, TRequestInfo>>>(
+                            (pool) => this.m_RequestExecutingContextPool = pool, Config));
+
+                    if (!m_SocketServer.Start())
+                    {
+                        m_StateCode = ServerStateConst.NotStarted;
+                        return false;
+                    }
+
+                    m_ServerResources = transaction.Items.OfType<ServerResourceItem>().ToArray();
+                    transaction.Commit();
+                }
+            }
+            catch (Exception e)
+            {
+                Logger.Error(e);
                 return false;
             }
 
@@ -1171,6 +1201,11 @@ namespace SuperSocket.SocketBase
             m_SocketServer.Stop();
 
             m_StateCode = ServerStateConst.NotStarted;
+
+            //Rollback as clean
+            Parallel.ForEach(m_ServerResources, r => r.Rollback());
+            GC.Collect();
+            GC.WaitForFullGCComplete();
 
             OnStopped();
 
@@ -1298,19 +1333,38 @@ namespace SuperSocket.SocketBase
                             {
                                 cancelled = true;
                                 if(Logger.IsInfoEnabled)
-                                    Logger.Info(session, string.Format("The executing of the command {0} was cancelled by the command filter {1}.", command.Name, filter.GetType().ToString()));
+                                    Logger.Info(string.Format("The executing of the command {0} was cancelled by the command filter {1}.", command.Name, filter.GetType().ToString()), session);
                                 break;
                             }
                         }
 
                         if (!cancelled)
                         {
-                            command.ExecuteCommand(session, requestInfo);
+                            try
+                            {
+                                command.ExecuteCommand(session, requestInfo);
+                            }
+                            catch (Exception exc)
+                            {
+                                commandContext.Exception = exc;
+                            }
 
                             for (var i = 0; i < commandFilters.Length; i++)
                             {
                                 var filter = commandFilters[i];
                                 filter.OnCommandExecuted(commandContext);
+                            }
+
+                            if (commandContext.Exception != null && !commandContext.ExceptionHandled)
+                            {
+                                try
+                                {
+                                    session.InternalHandleExcetion(commandContext.Exception);
+                                }
+                                catch
+                                {
+
+                                }
                             }
                         }
                     }
@@ -1320,7 +1374,7 @@ namespace SuperSocket.SocketBase
                         session.PrevCommand = requestInfo.Key;
 
                         if (Config.LogCommand && Logger.IsInfoEnabled)
-                            Logger.Info(session, string.Format("Command - {0}", requestInfo.Key));
+                            Logger.Info(string.Format("Command - {0}", requestInfo.Key), session);
                     }
                 }
                 else
@@ -1347,7 +1401,7 @@ namespace SuperSocket.SocketBase
                 session.LastActiveTime = DateTime.Now;
 
                 if (Config.LogCommand && Logger.IsInfoEnabled)
-                    Logger.Info(session, string.Format("Command - {0}", requestInfo.Key));
+                    Logger.Info(string.Format("Command - {0}", requestInfo.Key), session);
             }
 
             Interlocked.Increment(ref m_TotalHandledRequests);
@@ -1360,9 +1414,19 @@ namespace SuperSocket.SocketBase
         /// <param name="requestInfo">The request info.</param>
         internal void ExecuteCommand(IAppSession session, TRequestInfo requestInfo)
         {
-            var context = new RequestExecutingContext<TAppSession, TRequestInfo>((TAppSession)session, requestInfo);
-            Task.Factory.StartNew(ExecuteCommandInTask, context, CancellationToken.None, TaskCreationOptions.None, TaskScheduler.Default)
-                .ContinueWith(HandleErrorForExecuteCommandInTask, TaskContinuationOptions.OnlyOnFaulted);
+            var context = m_RequestExecutingContextPool.Get();
+            context.Initialize((TAppSession)session, requestInfo);
+
+            if (m_RequestHandlingTaskScheduler == null)
+            {
+                ExecuteCommandInTask(context);
+                m_RequestExecutingContextPool.Return(context);
+            }
+            else
+            {
+                Task.Factory.StartNew(ExecuteCommandInTask, context, CancellationToken.None, TaskCreationOptions.None, m_RequestHandlingTaskScheduler)
+                    .ContinueWith(HandleTaskCompleted);
+            }
         }
 
         void ExecuteCommandInTask(object state)
@@ -1371,10 +1435,14 @@ namespace SuperSocket.SocketBase
             this.ExecuteCommand(context.Session, context.RequestInfo);
         }
 
-        void HandleErrorForExecuteCommandInTask(Task task)
+        void HandleTaskCompleted(Task task)
         {
             var context = task.AsyncState as RequestExecutingContext<TAppSession, TRequestInfo>;
-            context.Session.InternalHandleExcetion(task.Exception.InnerException);
+
+            if (task.IsFaulted)
+                context.Session.InternalHandleExcetion(task.Exception.InnerException);
+
+            m_RequestExecutingContextPool.Return(context);
         }
 
         /// <summary>
@@ -1454,7 +1522,7 @@ namespace SuperSocket.SocketBase
             appSession.SocketSession.Closed += OnSocketSessionClosed;
 
             if (Config.LogBasicSessionActivity && Logger.IsInfoEnabled)
-                Logger.InfoFormat("A new session connected!");
+                Logger.Info("A new session connected!", session);
 
             OnNewSessionConnected(appSession);
             return true;
@@ -1517,7 +1585,7 @@ namespace SuperSocket.SocketBase
         {
             //Even if LogBasicSessionActivity is false, we also log the unexpected closing because the close reason probably be useful
             if (Logger.IsInfoEnabled && (Config.LogBasicSessionActivity || (reason != CloseReason.ServerClosing && reason != CloseReason.ClientClosing && reason != CloseReason.ServerShutdown && reason != CloseReason.SocketError)))
-                Logger.Info(session, string.Format("This session was closed for {0}!", reason));
+                Logger.Info(string.Format("This session was closed for {0}!", reason), session);
 
             var appSession = session.AppSession as TAppSession;
             appSession.Connected = false;
@@ -1548,7 +1616,7 @@ namespace SuperSocket.SocketBase
                 if (!m_SessionContainer.TryUnregisterSession(sessionID))
                 {
                     if (Logger.IsErrorEnabled)
-                        Logger.Error(session, "Failed to remove this session, Because it has't been in session container!");
+                        Logger.Error("Failed to remove this session, Because it has't been in session container!", session);
                 }
             }
 
@@ -1591,7 +1659,7 @@ namespace SuperSocket.SocketBase
                 return true;
 
             if (Logger.IsErrorEnabled)
-                Logger.Error(appSession, "The session is refused because the it's ID already exists!");
+                Logger.Error("The session is refused because the it's ID already exists!", appSession);
 
             return false;
         }
@@ -1659,7 +1727,7 @@ namespace SuperSocket.SocketBase
                     System.Threading.Tasks.Parallel.ForEach(timeOutSessions, s =>
                     {
                         if (Logger.IsInfoEnabled)
-                            Logger.Info(s, string.Format("The session will be closed for {0} timeout, the session start time: {1}, last active time: {2}!", now.Subtract(s.LastActiveTime).TotalSeconds, s.StartTime, s.LastActiveTime));
+                            Logger.Info(string.Format("The session will be closed for {0} timeout, the session start time: {1}, last active time: {2}!", now.Subtract(s.LastActiveTime).TotalSeconds, s.StartTime, s.LastActiveTime), s);
                         s.Close(CloseReason.TimeOut);
                     });
                 }
@@ -1800,8 +1868,8 @@ namespace SuperSocket.SocketBase
 
             serverStatus[StatusInfoKeys.RequestHandlingSpeed] = ((totalHandledRequests - totalHandledRequests0) / now.Subtract(serverStatus.CollectedTime).TotalSeconds);
             serverStatus[StatusInfoKeys.TotalHandledRequests] = totalHandledRequests;
-            serverStatus[StatusInfoKeys.AvialableSendingQueueItems] = m_SocketServer.SendingQueuePool.AvialableItemsCount;
-            serverStatus[StatusInfoKeys.TotalSendingQueueItems] = m_SocketServer.SendingQueuePool.TotalItemsCount;
+            serverStatus[StatusInfoKeys.AvialableSendingQueueItems] = m_SocketServer.SendingQueuePool.AvailableCount;
+            serverStatus[StatusInfoKeys.TotalSendingQueueItems] = m_SocketServer.SendingQueuePool.TotalCount;
 
             serverStatus.CollectedTime = now;
         }

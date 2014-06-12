@@ -9,6 +9,7 @@ using SuperSocket.SocketBase.Logging;
 using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Config;
 using SuperSocket.SocketBase.Protocol;
+using SuperSocket.ProtoBase;
 
 namespace SuperSocket.SocketBase
 {
@@ -55,6 +56,12 @@ namespace SuperSocket.SocketBase
         DateTime StartTime { get; }
 
         /// <summary>
+        /// Creates the pipeline processor.
+        /// </summary>
+        /// <returns></returns>
+        IPipelineProcessor CreatePipelineProcessor();
+
+        /// <summary>
         /// Closes this session.
         /// </summary>
         void Close();
@@ -99,16 +106,6 @@ namespace SuperSocket.SocketBase
         /// Gets the logger assosiated with this session.
         /// </summary>
         ILog Logger { get; }
-
-        /// <summary>
-        /// Processes the request.
-        /// </summary>
-        /// <param name="readBuffer">The read buffer.</param>
-        /// <param name="offset">The offset.</param>
-        /// <param name="length">The length.</param>
-        /// <param name="toBeCopied">if set to <c>true</c> [to be copied].</param>
-        /// <returns>return offset delta of next receiving buffer</returns>
-        int ProcessRequest(byte[] readBuffer, int offset, int length, bool toBeCopied);
 
         /// <summary>
         /// Starts the session.

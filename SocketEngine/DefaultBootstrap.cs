@@ -22,7 +22,7 @@ namespace SuperSocket.SocketEngine
     /// <summary>
     /// SuperSocket default bootstrap
     /// </summary>
-    public partial class DefaultBootstrap : IBootstrap
+    public partial class DefaultBootstrap : IBootstrap, IDisposable
     {
         private List<IWorkItem> m_AppServers;
 
@@ -74,6 +74,11 @@ namespace SuperSocket.SocketEngine
         /// Gets the startup config file.
         /// </summary>
         public string StartupConfigFile { get; private set; }
+
+        /// <summary>
+        /// Gets the <see cref="PerformanceMonitor"/> class.
+        /// </summary>
+        public IPerformanceMonitor PerfMonitor { get { return m_PerfMonitor; } }
 
         private PerformanceMonitor m_PerfMonitor;
 
@@ -581,6 +586,27 @@ namespace SuperSocket.SocketEngine
 
             if (!RemotingConfiguration.GetRegisteredWellKnownServiceTypes().Any(s => s.ObjectType == bootstrapProxyType))
                 RemotingConfiguration.RegisterWellKnownServiceType(bootstrapProxyType, "Bootstrap.rem", WellKnownObjectMode.Singleton);
+        }
+
+        /// <summary>
+        /// Releases unmanaged and - optionally - managed resources.
+        /// </summary>
+        /// <param name="disposing"><c>true</c> to release both managed and unmanaged resources; <c>false</c> to release only unmanaged resources.</param>
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                AppDomain.CurrentDomain.UnhandledException -= new UnhandledExceptionEventHandler(CurrentDomain_UnhandledException);
+            }
+        }
+
+        /// <summary>
+        /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
+        /// </summary>
+        public void Dispose()
+        {
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
     }
 }

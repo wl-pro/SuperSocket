@@ -55,6 +55,16 @@ namespace SuperSocket.SocketBase.Config
         public const int DefaultIdleSessionTimeOut = 300;
 
         /// <summary>
+        /// The default min request handling threads
+        /// </summary>
+        public const int DefaultMinRequestHandlingThreads = 1;
+
+        /// <summary>
+        /// The default max request handling threads
+        /// </summary>
+        public const int DefaultMaxRequestHandlingThreads = 5;
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="ServerConfig"/> class.
         /// </summary>
         /// <param name="serverConfig">The server config.</param>
@@ -66,16 +76,21 @@ namespace SuperSocket.SocketBase.Config
             this.OptionElements = serverConfig.OptionElements;
 
             if (serverConfig.Certificate != null)
-                this.Certificate = serverConfig.Certificate.CopyPropertiesTo(new CertificateConfig());
+                this.Certificate = serverConfig.Certificate.MakeCopy<CertificateConfig>();
 
             if (serverConfig.Listeners != null && serverConfig.Listeners.Any())
             {
-                this.Listeners = serverConfig.Listeners.Select(l => l.CopyPropertiesTo(new ListenerConfig())).OfType<ListenerConfig>().ToArray();
+                this.Listeners = serverConfig.Listeners.MakeCopy<ListenerConfig>();
             }
 
             if (serverConfig.CommandAssemblies != null && serverConfig.CommandAssemblies.Any())
             {
-                this.CommandAssemblies = serverConfig.CommandAssemblies.Select(c => c.CopyPropertiesTo(new CommandAssemblyConfig())).OfType<CommandAssemblyConfig>().ToArray();
+                this.CommandAssemblies = serverConfig.CommandAssemblies.MakeCopy<CommandAssemblyConfig>();
+            }
+
+            if (serverConfig.BufferPools != null && serverConfig.BufferPools.Any())
+            {
+                this.BufferPools = serverConfig.BufferPools.MakeCopy<BufferPoolConfig>();
             }
         }
 
@@ -96,6 +111,8 @@ namespace SuperSocket.SocketBase.Config
             SendTimeOut = DefaultSendTimeout;
             ClearIdleSessionInterval = DefaultClearIdleSessionInterval;
             IdleSessionTimeOut = DefaultIdleSessionTimeOut;
+            MinRequestHandlingThreads = DefaultMinRequestHandlingThreads;
+            MaxRequestHandlingThreads = DefaultMaxRequestHandlingThreads;
         }
 
         #region IServerConfig Members
@@ -357,12 +374,20 @@ namespace SuperSocket.SocketBase.Config
         public RequestHandlingMode RequestHandlingMode { get; set; }
 
         /// <summary>
-        /// Gets/sets the count of request handling threads.
+        /// Gets the minimum count of request handling threads.
         /// </summary>
         /// <value>
-        /// the count of request handling threads.
+        /// Gets the minimum count of request handling threads.
         /// </value>
-        public int RequestHandlingThreads { get; set; }
+        public int MinRequestHandlingThreads { get; set; }
+
+        /// <summary>
+        /// Gets the maximum request handling threads count.
+        /// </summary>
+        /// <value>
+        /// The maximum request handling threads count.
+        /// </value>
+        public int MaxRequestHandlingThreads { get; set; }
 
         /// <summary>
         /// Gets the command assemblies configuration.
@@ -371,6 +396,14 @@ namespace SuperSocket.SocketBase.Config
         /// The command assemblies.
         /// </value>
         public IEnumerable<ICommandAssemblyConfig> CommandAssemblies { get; set; }
+
+        /// <summary>
+        /// Gets/sets the buffer pools configuration.
+        /// </summary>
+        /// <value>
+        /// The buffer pools configuration.
+        /// </value>
+        public IEnumerable<IBufferPoolConfig> BufferPools { get; set; }
 
         #endregion
     }

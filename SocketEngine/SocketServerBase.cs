@@ -13,11 +13,16 @@ using SuperSocket.Common;
 using SuperSocket.SocketBase;
 using SuperSocket.SocketBase.Command;
 using SuperSocket.SocketBase.Logging;
+using SuperSocket.SocketBase.Pool;
 using SuperSocket.SocketBase.Protocol;
+using SuperSocket.SocketBase.Utils;
+using SuperSocket.SocketBase.ServerResource;
+using SuperSocket.SocketEngine.ServerResource;
+using System.Threading.Tasks;
 
 namespace SuperSocket.SocketEngine
 {
-    abstract class SocketServerBase : ISocketServer, IDisposable
+    abstract class SocketServerBase : ISocketServer, IDisposable, IAsyncSocketEventComplete
     {
         protected object SyncRoot = new object();
 
@@ -31,18 +36,34 @@ namespace SuperSocket.SocketEngine
 
         protected bool IsStopped { get; set; }
 
+        private IPool<SaeState> m_SaePool;
+
+        protected IPool<SaeState> SaePool
+        {
+            get { return m_SaePool; }
+        }
+
+        private IPool<BufferState> m_BufferStatePool;
+
+        protected IPool<BufferState> BufferStatePool
+        {
+            get { return m_BufferStatePool; }
+        }
+
         /// <summary>
         /// Gets the sending queue manager.
         /// </summary>
         /// <value>
         /// The sending queue manager.
         /// </value>
-        internal ISmartPool<SendingQueue> SendingQueuePool { get; private set; }
+        internal IPool<SendingQueue> SendingQueuePool { get; private set; }
 
-        IPoolInfo ISocketServer.SendingQueuePool
+        IPool ISocketServer.SendingQueuePool
         {
             get { return this.SendingQueuePool; }
         }
+
+        private ServerResourceItem[] m_ServerResources;
 
         public SocketServerBase(IAppServer appServer, ListenerInfo[] listeners)
         {
@@ -60,14 +81,41 @@ namespace SuperSocket.SocketEngine
 
             ILog log = AppServer.Logger;
 
-            var config = AppServer.Config;
+            try
+            {
+                using (var transaction = new LightweightTransaction())
+                {
+                    var config = this.AppServer.Config;
 
-            var sendingQueuePool = new SmartPool<SendingQueue>();
-            sendingQueuePool.Initialize(Math.Max(config.MaxConnectionNumber / 6, 256),
-                    Math.Max(config.MaxConnectionNumber * 2, 256),
-                    new SendingQueueSourceCreator(config.SendingQueueSize));
+                    transaction.RegisterItem(ServerResourceItem.Create<SaePoolResource, IPool<SaeState>>(
+                        (pool) => this.m_SaePool = pool, config));
 
-            SendingQueuePool = sendingQueuePool;
+                    transaction.RegisterItem(ServerResourceItem.Create<BufferStatePoolResource, IPool<BufferState>>(
+                        (pool) => this.m_BufferStatePool = pool, config));
+
+                    transaction.RegisterItem(ServerResourceItem.Create<SendingQueuePoolResource, IPool<SendingQueue>>(
+                        (pool) => this.SendingQueuePool = pool, config));
+
+                    if (!StartListeners())
+                        return false;
+
+                    m_ServerResources = transaction.Items.OfType<ServerResourceItem>().ToArray();
+                    transaction.Commit();
+                }
+            }
+            catch (Exception e)
+            {
+                log.Error(e);
+                return false;
+            }
+
+            IsRunning = true;
+            return true;
+        }
+
+        private bool StartListeners()
+        {
+            ILog log = AppServer.Logger;
 
             for (var i = 0; i < ListenerInfos.Length; i++)
             {
@@ -102,7 +150,6 @@ namespace SuperSocket.SocketEngine
                 }
             }
 
-            IsRunning = true;
             return true;
         }
 
@@ -143,7 +190,20 @@ namespace SuperSocket.SocketEngine
 
             Listeners.Clear();
 
+            // Clean the attached server resources
+            if (m_ServerResources != null)
+            {
+                Parallel.ForEach(m_ServerResources, (r) => r.Rollback());
+            }
+
             IsRunning = false;
+        }
+
+        void IAsyncSocketEventComplete.HandleSocketEventComplete(object sender, SocketAsyncEventArgs e)
+        {
+            var userToken = e.UserToken as SaeState;
+            var socketSession = userToken.SocketSession as IAsyncSocketSession;
+            socketSession.ProcessReceive(e);
         }
 
         #region IDisposable Members
